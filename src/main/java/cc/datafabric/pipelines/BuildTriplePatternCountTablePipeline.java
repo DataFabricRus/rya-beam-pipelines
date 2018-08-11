@@ -1,17 +1,26 @@
 package cc.datafabric.pipelines;
 
+import cc.datafabric.pipelines.coders.IntermediateProspectCoder;
+import cc.datafabric.pipelines.coders.MapEntryCoder;
+import cc.datafabric.pipelines.coders.RangeCoder;
 import cc.datafabric.pipelines.options.DefaultRyaPipelineOptions;
 import org.apache.accumulo.core.client.*;
+import org.apache.accumulo.core.client.Scanner;
+import org.apache.accumulo.core.client.admin.NewTableConfiguration;
 import org.apache.accumulo.core.client.security.tokens.PasswordToken;
 import org.apache.accumulo.core.data.Key;
 import org.apache.accumulo.core.data.Mutation;
 import org.apache.accumulo.core.data.Range;
 import org.apache.accumulo.core.data.Value;
+import org.apache.accumulo.core.iterators.Combiner;
+import org.apache.accumulo.core.iterators.LongCombiner;
+import org.apache.accumulo.core.iterators.user.SummingCombiner;
 import org.apache.accumulo.core.security.Authorizations;
 import org.apache.accumulo.core.security.ColumnVisibility;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineRunner;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.io.hadoop.WritableCoder;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.transforms.*;
@@ -27,21 +36,17 @@ import org.apache.rya.prospector.domain.IntermediateProspect;
 import org.apache.rya.prospector.domain.TripleValueType;
 import org.apache.rya.prospector.plans.IndexWorkPlan;
 import org.apache.rya.prospector.utils.ProspectorConstants;
-import org.apache.rya.prospector.utils.ProspectorUtils;
 import org.eclipse.rdf4j.model.util.URIUtil;
 import org.eclipse.rdf4j.model.vocabulary.XMLSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
-import java.time.Instant;
-import java.time.format.DateTimeFormatter;
-import java.util.Arrays;
-import java.util.Date;
-import java.util.List;
+import java.util.*;
+import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
-import static org.apache.rya.prospector.utils.ProspectorConstants.*;
+import static org.apache.rya.prospector.utils.ProspectorConstants.COUNT;
 
 interface BuildTriplePatternCountTablePipelineOptions extends DefaultRyaPipelineOptions {
 
@@ -61,10 +66,6 @@ interface BuildTriplePatternCountTablePipelineOptions extends DefaultRyaPipeline
 
     void setNumParallelBatches(int numParallelBatches);
 
-    String getVersionDate();
-
-    void setVersionDate(String dateTime);
-
 }
 
 class BuildTriplePatternCountTablePipeline {
@@ -75,11 +76,10 @@ class BuildTriplePatternCountTablePipeline {
         Pipeline p = Pipeline.create(options);
 
         int numParallelBatches = options.getNumParallelBatches();
-        String versionDateAsString = options.getVersionDate();
 
         p.getCoderRegistry().registerCoderForClass(String.class, StringUtf8Coder.of());
-        p.getCoderRegistry().registerCoderForClass(Range.class, WritableCoder.of(Range.class));
-        p.getCoderRegistry().registerCoderForClass(IntermediateProspect.class, WritableCoder.of(IntermediateProspect.class));
+        p.getCoderRegistry().registerCoderForClass(Range.class, RangeCoder.of());
+        p.getCoderRegistry().registerCoderForClass(IntermediateProspect.class, new IntermediateProspectCoder());
         p.getCoderRegistry().registerCoderForClass(Mutation.class, WritableCoder.of(Mutation.class));
 
         p
@@ -96,42 +96,63 @@ class BuildTriplePatternCountTablePipeline {
                         final Connector conn = instance.getConnector(
                                 options.getAccumuloUsername(), new PasswordToken(options.getAccumuloPassword()));
 
+                        // Create the output table if doesn't exist
+                        boolean exists = conn.tableOperations().exists(options.getOutTable());
+                        if (!exists) {
+                            LOG.info("Table {} doesn't exist. Will create it.", options.getOutTable());
+                            conn.tableOperations().create(options.getOutTable(), new NewTableConfiguration()
+                                    .withoutDefaultIterators());
+                        }
+                        // Attach the iterator if it doesn't exist
+                        exists = conn.tableOperations().listIterators(options.getOutTable())
+                                .containsKey("prospectsSumming");
+                        if (!exists) {
+                            LOG.info("Prospects summing iterator doesn't exist. Will attach it.");
+                            IteratorSetting iteratorSetting = new IteratorSetting(
+                                    15,
+                                    "prospectsSumming",
+                                    SummingCombiner.class
+                            );
+                            LongCombiner.setEncodingType(iteratorSetting, LongCombiner.Type.STRING);
+                            Combiner.setColumns(iteratorSetting,
+                                    Collections.singletonList(new IteratorSetting.Column(ProspectorConstants.COUNT)));
+                            conn.tableOperations().attachIterator(options.getOutTable(), iteratorSetting);
+                        }
+
                         List<Text> splits = Arrays.asList(conn.tableOperations()
                                 .listSplits(options.getInTable())
                                 .toArray(new Text[0]));
 
                         if (splits.isEmpty()) {
                             // Then we're going to read the whole table at once
-                            LOG.info("Table {} doesn't have splits!", options.getInTable());
+                            LOG.info("Table {}. There is no splits!", options.getOutTable());
 
                             ctx.output(new Range());
                         } else {
-                            LOG.info("Table {}. Found {} splits", options.getInTable(), splits.size());
+                            LOG.info("Table {}. Found {} splits", options.getOutTable(), splits.size());
                             int index = 0;
                             while (index < splits.size()) {
                                 Range range;
                                 if (index == 0) {
-                                    range = new Range(
-                                            null, true,
-                                            splits.get(index + 1), false);
-                                } else if (index < splits.size() - 1) {
-                                    range = new Range(
-                                            splits.get(index), true,
-                                            splits.get(index + 1), false);
+                                    range = new Range(null, false,
+                                            splits.get(index), false);
                                 } else {
-                                    range = new Range(
-                                            splits.get(index), true,
-                                            null, false);
+                                    range = new Range(splits.get(index - 1), true,
+                                            splits.get(index), false);
                                 }
 
                                 ctx.output(range);
 
                                 index++;
                             }
+
+                            ctx.output(new Range(splits.get(index - 1), true,
+                                    null, false));
                         }
                     }
                 }))
-                .apply("Read rows", ParDo.of(new DoFn<Range, KV<Key, Value>>() {
+                .apply(Reshuffle.viaRandomKey())
+                .apply("Read rows", ParDo.of(new DoFn<Range, Map.Entry<Key, Value>>() {
 
                     @ProcessElement
                     public void processElement(ProcessContext ctx) throws Exception {
@@ -148,15 +169,16 @@ class BuildTriplePatternCountTablePipeline {
                         try (Scanner scanner = conn.createScanner(options.getInTable(), Authorizations.EMPTY)) {
                             scanner.setRange(range);
 
-                            scanner.forEach(it -> ctx.output(KV.of(it.getKey(), it.getValue())));
+                            scanner.forEach(ctx::output);
                         }
                     }
 
                 }))
-                .apply("Create intermediate prospects", ParDo.of(new DoFn<KV<Key, Value>, KV<String, KV<IntermediateProspect, Long>>>() {
+                .setCoder(new MapEntryCoder<>(WritableCoder.of(Key.class), WritableCoder.of(Value.class)))
+                .apply("Create intermediate prospects", ParDo.of(new DoFn<Map.Entry<Key, Value>, Map.Entry<IntermediateProspect, Long>>() {
                     @ProcessElement
                     public void processElement(ProcessContext ctx) throws TripleRowResolverException {
-                        final KV<Key, Value> kv = ctx.element();
+                        final Map.Entry<Key, Value> kv = ctx.element();
                         try {
                             RyaTripleContext rtc = new RyaTripleContext(false);
                             RyaStatement statement = rtc
@@ -183,8 +205,8 @@ class BuildTriplePatternCountTablePipeline {
                             final String namespace = subject.substring(0, localIndex - 1);
                             final String visibility = new String(statement.getColumnVisibility(), StandardCharsets.UTF_8);
 
-                            ctx.output(KV.of(subject,
-                                    KV.of(
+                            ctx.output(
+                                    new HashMap.SimpleEntry<>(
                                             IntermediateProspect.builder()
                                                     .setIndex(ProspectorConstants.COUNT)
                                                     .setData(subject)
@@ -193,10 +215,10 @@ class BuildTriplePatternCountTablePipeline {
                                                     .setVisibility(visibility)
                                                     .build(),
                                             1L
-                                    ))
+                                    )
                             );
-                            ctx.output(KV.of(predicate,
-                                    KV.of(
+                            ctx.output(
+                                    new HashMap.SimpleEntry<>(
                                             IntermediateProspect.builder()
                                                     .setIndex(ProspectorConstants.COUNT)
                                                     .setData(predicate)
@@ -205,10 +227,10 @@ class BuildTriplePatternCountTablePipeline {
                                                     .setVisibility(visibility)
                                                     .build(),
                                             1L
-                                    ))
+                                    )
                             );
-                            ctx.output(KV.of(object.getData(),
-                                    KV.of(
+                            ctx.output(
+                                    new HashMap.SimpleEntry<>(
                                             IntermediateProspect.builder()
                                                     .setIndex(ProspectorConstants.COUNT)
                                                     .setData(object.getData())
@@ -217,10 +239,10 @@ class BuildTriplePatternCountTablePipeline {
                                                     .setVisibility(visibility)
                                                     .build(),
                                             1L
-                                    ))
+                                    )
                             );
-                            ctx.output(KV.of(subjpred,
-                                    KV.of(
+                            ctx.output(
+                                    new HashMap.SimpleEntry<>(
                                             IntermediateProspect.builder()
                                                     .setIndex(ProspectorConstants.COUNT)
                                                     .setData(subjpred)
@@ -229,10 +251,10 @@ class BuildTriplePatternCountTablePipeline {
                                                     .setVisibility(visibility)
                                                     .build(),
                                             1L
-                                    ))
+                                    )
                             );
-                            ctx.output(KV.of(subjobj,
-                                    KV.of(
+                            ctx.output(
+                                    new HashMap.SimpleEntry<>(
                                             IntermediateProspect.builder()
                                                     .setIndex(ProspectorConstants.COUNT)
                                                     .setData(subjobj)
@@ -241,10 +263,10 @@ class BuildTriplePatternCountTablePipeline {
                                                     .setVisibility(visibility)
                                                     .build(),
                                             1L
-                                    ))
+                                    )
                             );
-                            ctx.output(KV.of(predobj,
-                                    KV.of(
+                            ctx.output(
+                                    new HashMap.SimpleEntry<>(
                                             IntermediateProspect.builder()
                                                     .setIndex(ProspectorConstants.COUNT)
                                                     .setData(predobj)
@@ -253,10 +275,10 @@ class BuildTriplePatternCountTablePipeline {
                                                     .setVisibility(visibility)
                                                     .build(),
                                             1L
-                                    ))
+                                    )
                             );
-                            ctx.output(KV.of(namespace,
-                                    KV.of(
+                            ctx.output(
+                                    new HashMap.SimpleEntry<>(
                                             IntermediateProspect.builder()
                                                     .setIndex(ProspectorConstants.COUNT)
                                                     .setData(namespace)
@@ -265,7 +287,7 @@ class BuildTriplePatternCountTablePipeline {
                                                     .setVisibility(visibility)
                                                     .build(),
                                             1L
-                                    ))
+                                    )
                             );
                         } catch (Throwable e) {
                             LOG.error(e.getMessage(), e);
@@ -274,41 +296,55 @@ class BuildTriplePatternCountTablePipeline {
                         }
                     }
                 }))
-                .apply("Aggregate prospects", Combine.perKey((Iterable<KV<IntermediateProspect, Long>> it) ->
-                        StreamSupport.stream(it.spliterator(), true)
-                                .reduce((a, b) -> KV.of(a.getKey(), a.getValue() + b.getValue()))
-                                .get())
-                )
-                .apply(Values.create())
-                .apply("Convert prospect to mutation", MapElements.via(new SimpleFunction<KV<IntermediateProspect, Long>, KV<String, Mutation>>() {
+                .setCoder(new MapEntryCoder<>(WritableCoder.of(IntermediateProspect.class), VarLongCoder.of()))
+                .apply("Partition prospects", ParDo.of(new DoFn<Map.Entry<IntermediateProspect, Long>, KV<String, Map.Entry<IntermediateProspect, Long>>>() {
 
-                    @Override
-                    public KV<String, Mutation> apply(KV<IntermediateProspect, Long> input) {
+                    @ProcessElement
+                    public void apply(@Element Map.Entry<IntermediateProspect, Long> input, OutputReceiver<KV<String, Map.Entry<IntermediateProspect, Long>>> receiver) {
+                        final int numShards = numParallelBatches > 0 ? numParallelBatches : 1;
+                        final String shardId = "shard-" + ((System.currentTimeMillis() / 100) % numShards);
 
-                        final IntermediateProspect prospect = input.getKey();
-                        final Long prospectCount = input.getValue();
-                        final String indexType = prospect.getTripleValueType().getIndexType();
-                        final Date versionDate = Date.from(Instant.parse(versionDateAsString));
-
-                        final Mutation mutation = new Mutation(
-                                indexType + IndexWorkPlan.DELIM + prospect.getData()
-                                        + IndexWorkPlan.DELIM + ProspectorUtils.getReverseIndexDateTime(versionDate));
-
-                        final ColumnVisibility visibility = new ColumnVisibility(prospect.getVisibility());
-                        final Value sumValue = new Value(prospectCount.toString().getBytes(StandardCharsets.UTF_8));
-
-                        mutation.put(COUNT, prospect.getDataType(), visibility, versionDate.getTime(), sumValue);
-
-                        int shardNum = numParallelBatches > 0 ? numParallelBatches : 1;
-
-                        return KV.of(
-                                "shard-" + (System.currentTimeMillis() / 1000) % shardNum,
-                                mutation
-                        );
+                        receiver.output(KV.of(shardId, input));
                     }
                 }))
                 .apply(GroupIntoBatches.ofSize(options.getBatchSize()))
-                .apply("Write mutations", ParDo.of(new DoFn<KV<String, Iterable<Mutation>>, KV<String, Boolean>>() {
+                .apply("Aggregate prospects", ParDo.of(new DoFn<KV<String, Iterable<Map.Entry<IntermediateProspect, Long>>>, Map.Entry<IntermediateProspect, Long>>() {
+
+                    @ProcessElement
+                    public void processElement(ProcessContext ctx) {
+                        StreamSupport.stream(ctx.element().getValue().spliterator(), true)
+                                .collect(Collectors.groupingBy(Map.Entry::getKey))
+                                .entrySet()
+                                .parallelStream()
+                                .map(it -> it.getValue().stream()
+                                        .reduce((a, b) -> new HashMap.SimpleEntry<>(a.getKey(), a.getValue() + b.getValue()))
+                                        .orElseThrow(() -> new IllegalStateException("Count can't be zero!")))
+                                .forEach(ctx::output);
+                    }
+                }))
+                .apply("Convert prospect to mutation", MapElements.via(new SimpleFunction<Map.Entry<IntermediateProspect, Long>, KV<String, Mutation>>() {
+
+                    @Override
+                    public KV<String, Mutation> apply(Map.Entry<IntermediateProspect, Long> input) {
+                        final IntermediateProspect prospect = input.getKey();
+                        final Long prospectCount = input.getValue();
+                        final String indexType = prospect.getTripleValueType().getIndexType();
+
+                        final Mutation mutation = new Mutation(
+                                indexType + IndexWorkPlan.DELIM + prospect.getData());
+
+                        final ColumnVisibility visibility = new ColumnVisibility(prospect.getVisibility());
+                        final Value sumValue = new Value(new LongCombiner.StringEncoder().encode(prospectCount));
+
+                        mutation.put(COUNT, prospect.getDataType(), visibility, System.currentTimeMillis(), sumValue);
+
+                        int shardNum = numParallelBatches > 0 ? numParallelBatches : 1;
+
+                        return KV.of("shard-" + ((System.currentTimeMillis() / 100) % shardNum), mutation);
+                    }
+                }))
+                .apply(GroupIntoBatches.ofSize(options.getBatchSize()))
+                .apply("Write mutations", ParDo.of(new DoFn<KV<String, Iterable<Mutation>>, Boolean>() {
 
                     @ProcessElement
                     public void processElement(ProcessContext ctx) throws Exception {
@@ -326,36 +362,7 @@ class BuildTriplePatternCountTablePipeline {
                             writer.addMutations(mutations);
                         }
 
-                        ctx.output(KV.of("", true));
-                    }
-
-                }))
-                // Force to wait the end of the upstream
-                .apply(GroupByKey.create())
-                .apply("Write finalizing mutation", ParDo.of(new DoFn<KV<String, Iterable<Boolean>>, Boolean>() {
-
-                    @ProcessElement
-                    public void processElement(ProcessContext ctx) throws Exception {
-                        final BuildTriplePatternCountTablePipelineOptions options = ctx.getPipelineOptions()
-                                .as(BuildTriplePatternCountTablePipelineOptions.class);
-                        final Date versionDate = Date.from(Instant.parse(options.getVersionDate()));
-
-                        final Mutation mutation = new Mutation(METADATA);
-                        mutation.put(PROSPECT_TIME,
-                                ProspectorUtils.getReverseIndexDateTime(versionDate),
-                                new ColumnVisibility(ProspectorConstants.DEFAULT_VIS),
-                                versionDate.getTime(),
-                                new Value(ProspectorConstants.EMPTY)
-                        );
-                        final Instance instance = new ZooKeeperInstance(
-                                options.getAccumuloName(), options.getZookeeperServers());
-                        final Connector conn = instance.getConnector(
-                                options.getAccumuloUsername(), new PasswordToken(options.getAccumuloPassword()));
-                        final BatchWriterConfig config = new BatchWriterConfig();
-
-                        try (BatchWriter writer = conn.createBatchWriter(options.getOutTable(), config)) {
-                            writer.addMutation(mutation);
-                        }
+                        ctx.output(true);
                     }
 
                 }));
@@ -374,7 +381,7 @@ class BuildTriplePatternCountTablePipeline {
         options.setGcpTempLocation("gs://datafabric-dataflow/staging");
         options.setRunner((Class<PipelineRunner<?>>) Class.forName("org.apache.beam.runners.dataflow.DataflowRunner"));
 //        options.setRunner((Class<PipelineRunner<?>>) Class.forName("org.apache.beam.runners.direct.DirectRunner"));
-        options.setMaxNumWorkers(10);
+        options.setMaxNumWorkers(40);
 
         options.setAccumuloName("accumulo");
         options.setZookeeperServers("10.132.0.18:2181");
@@ -383,9 +390,8 @@ class BuildTriplePatternCountTablePipeline {
         options.setInTable("triplestore_spo");
         options.setOutTable("triplestore_prospects");
 
-        options.setVersionDate(DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
-        options.setBatchSize(50000);
-        options.setNumParallelBatches(5); // num tservers * 3 - 1
+        options.setBatchSize(1000000);
+        options.setNumParallelBatches(10);
 
         Pipeline p = BuildTriplePatternCountTablePipeline.create(options);
 

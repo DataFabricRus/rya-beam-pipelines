@@ -9,6 +9,7 @@ import org.apache.accumulo.core.security.Authorizations;
 import org.apache.accumulo.minicluster.MiniAccumuloCluster;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.commons.io.FileUtils;
+import org.apache.hadoop.io.Text;
 import org.apache.rya.accumulo.AccumuloRdfConfiguration;
 import org.apache.rya.accumulo.AccumuloRyaDAO;
 import org.apache.rya.api.domain.RyaIRI;
@@ -31,10 +32,10 @@ import org.junit.Test;
 
 import java.io.File;
 import java.io.IOException;
-import java.time.Instant;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.SortedSet;
+import java.util.TreeSet;
 
 import static org.junit.Assert.assertEquals;
 
@@ -62,10 +63,21 @@ public class BuildTriplePatternCountTablePipelineTest {
         connector = instance.getConnector(ACCUMULO_USERNAME, new PasswordToken(ACCUMULO_PASSWORD));
         connector.securityOperations().changeUserAuthorizations(ACCUMULO_USERNAME, new Authorizations("U", "FOUO"));
 
-        if (connector.tableOperations().exists(OUT_TABLE)) {
-            connector.tableOperations().delete(OUT_TABLE);
-        }
-        connector.tableOperations().create(OUT_TABLE);
+//        if (connector.tableOperations().exists(OUT_TABLE)) {
+//            connector.tableOperations().delete(OUT_TABLE);
+//        }
+//        NewTableConfiguration conf = new NewTableConfiguration()
+//                .withoutDefaultIterators();
+//        connector.tableOperations().create(OUT_TABLE, conf);
+//
+//        IteratorSetting iteratorSetting = new IteratorSetting(
+//                15,
+//                "prospectsSumming",
+//                SummingCombiner.class
+//        );
+//        LongCombiner.setEncodingType(iteratorSetting, LongCombiner.Type.STRING);
+//        Combiner.setColumns(iteratorSetting, Collections.singletonList(new IteratorSetting.Column(ProspectorConstants.COUNT)));
+//        connector.tableOperations().attachIterator(OUT_TABLE,iteratorSetting);
     }
 
     @After
@@ -82,17 +94,21 @@ public class BuildTriplePatternCountTablePipelineTest {
         ryaDAO.init();
 
         ryaDAO.add(new RyaStatement(
-                new RyaIRI("urn:gem:etype#1234"), new RyaIRI("urn:gem#pred"), new RyaType("mydata1")));
+                new RyaIRI("urn:gem:etype#1234"), new RyaIRI("urn:gem#pred"), new RyaType("mydata1"))); //2
         ryaDAO.add(new RyaStatement(
-                new RyaIRI("urn:gem:etype#1234"), new RyaIRI("urn:gem#pred"), new RyaType("mydata2")));
+                new RyaIRI("urn:gem:etype#1234"), new RyaIRI("urn:gem#pred"), new RyaType("mydata2"))); //3
         ryaDAO.add(new RyaStatement(
-                new RyaIRI("urn:gem:etype#1234"), new RyaIRI("urn:gem#pred"), new RyaType("12")));
+                new RyaIRI("urn:gem:etype#1234"), new RyaIRI("urn:gem#pred"), new RyaType("12"))); //1
         ryaDAO.add(new RyaStatement(
-                new RyaIRI("urn:gem:etype#1235"), new RyaIRI("urn:gem#pred"), new RyaType(XMLSchema.INTEGER, "12")));
+                new RyaIRI("urn:gem:etype#1235"), new RyaIRI("urn:gem#pred"), new RyaType(XMLSchema.INTEGER, "12"))); //4
         ryaDAO.add(new RyaStatement(
-                new RyaIRI("urn:gem:etype#1235"), new RyaIRI("urn:gem#pred1"), new RyaType("12")));
+                new RyaIRI("urn:gem:etype#1235"), new RyaIRI("urn:gem#pred1"), new RyaType("12"))); //5
 
         ryaDAO.destroy();
+
+        SortedSet<Text> splits = new TreeSet<>();
+        splits.add(new Text("urn:gem:etype#1234"));
+        connector.tableOperations().addSplits(IN_TABLE, splits);
 
         // Run the pipeline
         BuildTriplePatternCountTablePipelineOptions options = PipelineOptionsFactory
@@ -105,8 +121,7 @@ public class BuildTriplePatternCountTablePipelineTest {
         options.setInTable(IN_TABLE);
         options.setOutTable(OUT_TABLE);
         options.setBatchSize(1);
-        options.setNumParallelBatches(1);
-        options.setVersionDate(DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
+        options.setNumParallelBatches(2);
         BuildTriplePatternCountTablePipeline
                 .create(options)
                 .run()
@@ -114,25 +129,17 @@ public class BuildTriplePatternCountTablePipelineTest {
 
         final ProspectorService service = new ProspectorService(connector, OUT_TABLE);
         final String[] auths = {"U", "FOUO"};
-        List<Long> prospects = Lists.newArrayList(service.getProspects(auths));
-        assertEquals(1, prospects.size());
-
-        final Long prospectTimestamp = prospects.get(0);
-        final Long beginProspectRange = System.currentTimeMillis() - 100000;
-        final Long endProspectRange = System.currentTimeMillis() + 100000;
-
-        prospects = Lists.newArrayList(service.getProspectsInRange(beginProspectRange, endProspectRange, auths));
-        assertEquals(1, prospects.size());
 
         // Ensure one of the correct "entity" counts was created.
         List<String> queryTerms = new ArrayList<>();
         queryTerms.add("urn:gem:etype");
-        final List<IndexEntry> entityEntries = service.query(prospects,
+        final List<IndexEntry> entityEntries = service.query(null,
                 ProspectorConstants.COUNT,
                 TripleValueType.ENTITY.getIndexType(),
                 queryTerms,
                 IndexWorkPlan.URITYPE,
                 auths);
+        assertEquals(entityEntries.size(), 1);
 
         final List<IndexEntry> expectedEntityEntries = Lists.newArrayList(
                 IndexEntry.builder()
@@ -141,22 +148,23 @@ public class BuildTriplePatternCountTablePipelineTest {
                         .setDataType(IndexWorkPlan.URITYPE)
                         .setTripleValueType(TripleValueType.ENTITY.getIndexType())
                         .setVisibility("")
-                        .setTimestamp(prospectTimestamp)
+                        .setTimestamp(entityEntries.get(0).getTimestamp())
                         .setCount(5L)
                         .build());
 
         assertEquals(expectedEntityEntries, entityEntries);
 
         // Ensure one of the correct "subject" counts was created.
-        queryTerms = new ArrayList<String>();
+        queryTerms = new ArrayList<>();
         queryTerms.add("urn:gem:etype#1234");
         final List<IndexEntry> subjectEntries = service.query(
-                prospects,
+                null,
                 ProspectorConstants.COUNT,
                 TripleValueType.SUBJECT.getIndexType(),
                 queryTerms,
                 XMLSchema.ANYURI.stringValue(),
                 auths);
+        assertEquals(subjectEntries.size(), 1);
 
         final List<IndexEntry> expectedSubjectEntries = Lists.newArrayList(
                 IndexEntry.builder()
@@ -165,7 +173,7 @@ public class BuildTriplePatternCountTablePipelineTest {
                         .setDataType(XMLSchema.ANYURI.stringValue())
                         .setTripleValueType(TripleValueType.SUBJECT.getIndexType())
                         .setVisibility("")
-                        .setTimestamp(prospectTimestamp)
+                        .setTimestamp(subjectEntries.get(0).getTimestamp())
                         .setCount(3L)
                         .build());
 
@@ -175,11 +183,12 @@ public class BuildTriplePatternCountTablePipelineTest {
         queryTerms = new ArrayList<String>();
         queryTerms.add("urn:gem#pred");
         final List<IndexEntry> predicateEntries = service.query(
-                prospects, ProspectorConstants.COUNT,
+                null, ProspectorConstants.COUNT,
                 TripleValueType.PREDICATE.getIndexType(),
                 queryTerms,
                 XMLSchema.ANYURI.stringValue(),
                 auths);
+        assertEquals(predicateEntries.size(), 1);
 
         final List<IndexEntry> expectedPredicateEntries = Lists.newArrayList(
                 IndexEntry.builder()
@@ -188,7 +197,7 @@ public class BuildTriplePatternCountTablePipelineTest {
                         .setDataType(XMLSchema.ANYURI.stringValue())
                         .setTripleValueType(TripleValueType.PREDICATE.getIndexType())
                         .setVisibility("")
-                        .setTimestamp(prospectTimestamp)
+                        .setTimestamp(predicateEntries.get(0).getTimestamp())
                         .setCount(4L)
                         .build());
 
@@ -198,12 +207,14 @@ public class BuildTriplePatternCountTablePipelineTest {
         queryTerms = new ArrayList<String>();
         queryTerms.add("mydata1");
         final List<IndexEntry> objectEntries = service.query(
-                prospects,
+                null,
                 ProspectorConstants.COUNT,
                 TripleValueType.OBJECT.getIndexType(),
                 queryTerms,
                 XMLSchema.STRING.stringValue(),
                 auths);
+
+        assertEquals(objectEntries.size(), 1);
 
         final List<IndexEntry> expectedObjectEntries = Lists.newArrayList(
                 IndexEntry.builder()
@@ -212,7 +223,7 @@ public class BuildTriplePatternCountTablePipelineTest {
                         .setDataType(XMLSchema.STRING.stringValue())
                         .setTripleValueType(TripleValueType.OBJECT.getIndexType())
                         .setVisibility("")
-                        .setTimestamp(prospectTimestamp)
+                        .setTimestamp(objectEntries.get(0).getTimestamp())
                         .setCount(1L)
                         .build());
 
@@ -223,12 +234,14 @@ public class BuildTriplePatternCountTablePipelineTest {
         queryTerms.add("urn:gem:etype#1234");
         queryTerms.add("urn:gem#pred");
         final List<IndexEntry> subjectPredicateEntries = service.query(
-                prospects,
+                null,
                 ProspectorConstants.COUNT,
                 TripleValueType.SUBJECT_PREDICATE.getIndexType(),
                 queryTerms,
                 XMLSchema.STRING.stringValue(),
                 auths);
+
+        assertEquals(subjectPredicateEntries.size(), 1);
 
         final List<IndexEntry> expectedSubjectPredicateEntries = Lists.newArrayList(
                 IndexEntry.builder()
@@ -237,7 +250,7 @@ public class BuildTriplePatternCountTablePipelineTest {
                         .setDataType(XMLSchema.STRING.stringValue())
                         .setTripleValueType(TripleValueType.SUBJECT_PREDICATE.getIndexType())
                         .setVisibility("")
-                        .setTimestamp(prospectTimestamp)
+                        .setTimestamp(subjectPredicateEntries.get(0).getTimestamp())
                         .setCount(3L)
                         .build());
 
@@ -248,12 +261,14 @@ public class BuildTriplePatternCountTablePipelineTest {
         queryTerms.add("urn:gem#pred");
         queryTerms.add("12");
         final List<IndexEntry> predicateObjectEntries = service.query(
-                prospects,
+                null,
                 ProspectorConstants.COUNT,
                 TripleValueType.PREDICATE_OBJECT.getIndexType(),
                 queryTerms,
                 XMLSchema.STRING.stringValue(),
                 auths);
+
+        assertEquals(predicateObjectEntries.size(), 1);
 
         final List<IndexEntry> expectedPredicateObjectEntries = Lists.newArrayList(
                 IndexEntry.builder()
@@ -262,7 +277,7 @@ public class BuildTriplePatternCountTablePipelineTest {
                         .setDataType(XMLSchema.STRING.stringValue())
                         .setTripleValueType(TripleValueType.PREDICATE_OBJECT.getIndexType())
                         .setVisibility("")
-                        .setTimestamp(prospectTimestamp)
+                        .setTimestamp(predicateObjectEntries.get(0).getTimestamp())
                         .setCount(2L) // XXX This might be a bug. The object matching doesn't care about type.
                         .build());
 
@@ -273,12 +288,14 @@ public class BuildTriplePatternCountTablePipelineTest {
         queryTerms.add("urn:gem:etype#1234");
         queryTerms.add("mydata1");
         final List<IndexEntry> subjectObjectEntries = service.query(
-                prospects,
+                null,
                 ProspectorConstants.COUNT,
                 TripleValueType.SUBJECT_OBJECT.getIndexType(),
                 queryTerms,
                 XMLSchema.STRING.stringValue(),
                 auths);
+
+        assertEquals(subjectObjectEntries.size(), 1);
 
         final List<IndexEntry> expectedSubjectObjectEntries = Lists.newArrayList(
                 IndexEntry.builder()
@@ -287,7 +304,7 @@ public class BuildTriplePatternCountTablePipelineTest {
                         .setDataType(XMLSchema.STRING.stringValue())
                         .setTripleValueType(TripleValueType.SUBJECT_OBJECT.getIndexType())
                         .setVisibility("")
-                        .setTimestamp(prospectTimestamp)
+                        .setTimestamp(subjectObjectEntries.get(0).getTimestamp())
                         .setCount(1L)
                         .build());
 
@@ -320,7 +337,6 @@ public class BuildTriplePatternCountTablePipelineTest {
         options.setOutTable(OUT_TABLE);
         options.setBatchSize(1);
         options.setNumParallelBatches(1);
-        options.setVersionDate(DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
         BuildTriplePatternCountTablePipeline
                 .create(options)
                 .run()
