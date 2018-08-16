@@ -188,7 +188,7 @@ public class BuildTriplePatternCountTablePipelineTest {
         options.setAccumuloPassword(ACCUMULO_PASSWORD);
         options.setSource(IN_TABLE);
         options.setDestination(OUT_TABLE);
-        options.setBatchSize(2);
+        options.setBatchSize(10);
 
         BuildTriplePatternCountTablePipeline
                 .create(options)

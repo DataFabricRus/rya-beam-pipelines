@@ -71,13 +71,13 @@ interface BuildTriplePatternCountTablePipelineOptions extends DefaultRyaPipeline
 }
 
 /**
- * Reads triple from the SPO index, aggregate prospects and write them to a table.
- * <p>
- * - pipeline which does all the steps is {@see BuildTriplePatternCountTablePipeline.create},
- * - pipeline which reads the index and save prospects to files
- * {@see BuildTriplePatternCountTablePipeline.createFetchOnly},
- * - pipeline which reads prospects from the files, aggregate them and writes to a table
- * {@see BuildTriplePatternCountTablePipeline.createCombinerAndWriter}.
+ * Set of pipelines which help to build the Prospect table.
+ *
+ * <ul>
+ * <li>{@link #create(BuildTriplePatternCountTablePipelineOptions)} - pipeline which does all the steps,</li>
+ * <li>{@link #createFetchOnly(BuildTriplePatternCountTablePipelineOptions)} - pipeline which reads the index and save prospects to files,</li>
+ * <li>{@link #createCombinerAndWriter(BuildTriplePatternCountTablePipelineOptions)} - pipeline which reads prospects from the files, aggregate them and writes to a table.</li>
+ * </ul>
  */
 class BuildTriplePatternCountTablePipeline {
 
