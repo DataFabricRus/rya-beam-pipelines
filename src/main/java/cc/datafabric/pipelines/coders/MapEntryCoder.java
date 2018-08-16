@@ -1,7 +1,6 @@
 package cc.datafabric.pipelines.coders;
 
 import org.apache.beam.sdk.coders.Coder;
-import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.StructuredCoder;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeParameter;
@@ -19,7 +18,11 @@ public class MapEntryCoder<K, V> extends StructuredCoder<Map.Entry<K, V>> {
     private final Coder<K> keyCoder;
     private final Coder<V> valueCoder;
 
-    public MapEntryCoder(Coder<K> keyCoder, Coder<V> valueCoder) {
+    public static <K, V> Coder<Map.Entry<K, V>> of(Coder<K> keyCoder, Coder<V> valueCoder) {
+        return new MapEntryCoder<>(keyCoder, valueCoder);
+    }
+
+    private MapEntryCoder(Coder<K> keyCoder, Coder<V> valueCoder) {
         this.keyCoder = keyCoder;
         this.valueCoder = valueCoder;
     }

@@ -3,7 +3,6 @@ package cc.datafabric.pipelines.io;
 import org.apache.accumulo.core.data.Key;
 import org.apache.accumulo.core.data.Value;
 import org.apache.beam.sdk.transforms.PTransform;
-import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.PCollection;
 
 import java.util.Map;
@@ -17,8 +16,7 @@ public class AccumuloIO {
         private final String username;
         private final String password;
 
-        public Read(String instanceName, String zookeepers, String username,
-                    String password) {
+        public Read(String instanceName, String zookeepers, String username, String password) {
             this.instanceName = instanceName;
             this.zookeepers = zookeepers;
             this.username = username;
@@ -27,10 +25,7 @@ public class AccumuloIO {
 
         @Override
         public PCollection<Map.Entry<Key, Value>> expand(PCollection<String> input) {
-            return input.apply(
-                    ParDo.of(new AccumuloSplittableDoFn(
-                            instanceName, zookeepers, username, password, false))
-            );
+            return input.apply(new AccumuloReadAll(instanceName, zookeepers, username, password));
         }
     }
 

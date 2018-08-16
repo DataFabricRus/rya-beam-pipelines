@@ -3,8 +3,13 @@ package cc.datafabric.pipelines;
 import com.google.common.collect.Lists;
 import org.apache.accumulo.core.client.Connector;
 import org.apache.accumulo.core.client.Instance;
+import org.apache.accumulo.core.client.IteratorSetting;
 import org.apache.accumulo.core.client.ZooKeeperInstance;
+import org.apache.accumulo.core.client.admin.NewTableConfiguration;
 import org.apache.accumulo.core.client.security.tokens.PasswordToken;
+import org.apache.accumulo.core.iterators.Combiner;
+import org.apache.accumulo.core.iterators.LongCombiner;
+import org.apache.accumulo.core.iterators.user.SummingCombiner;
 import org.apache.accumulo.core.security.Authorizations;
 import org.apache.accumulo.minicluster.MiniAccumuloCluster;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
@@ -32,10 +37,7 @@ import org.junit.Test;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.SortedSet;
-import java.util.TreeSet;
+import java.util.*;
 
 import static org.junit.Assert.assertEquals;
 
@@ -63,27 +65,93 @@ public class BuildTriplePatternCountTablePipelineTest {
         connector = instance.getConnector(ACCUMULO_USERNAME, new PasswordToken(ACCUMULO_PASSWORD));
         connector.securityOperations().changeUserAuthorizations(ACCUMULO_USERNAME, new Authorizations("U", "FOUO"));
 
-//        if (connector.tableOperations().exists(OUT_TABLE)) {
-//            connector.tableOperations().delete(OUT_TABLE);
-//        }
-//        NewTableConfiguration conf = new NewTableConfiguration()
-//                .withoutDefaultIterators();
-//        connector.tableOperations().create(OUT_TABLE, conf);
-//
-//        IteratorSetting iteratorSetting = new IteratorSetting(
-//                15,
-//                "prospectsSumming",
-//                SummingCombiner.class
-//        );
-//        LongCombiner.setEncodingType(iteratorSetting, LongCombiner.Type.STRING);
-//        Combiner.setColumns(iteratorSetting, Collections.singletonList(new IteratorSetting.Column(ProspectorConstants.COUNT)));
-//        connector.tableOperations().attachIterator(OUT_TABLE,iteratorSetting);
+        if (connector.tableOperations().exists(OUT_TABLE)) {
+            connector.tableOperations().delete(OUT_TABLE);
+        }
+        NewTableConfiguration conf = new NewTableConfiguration()
+                .withoutDefaultIterators();
+        connector.tableOperations().create(OUT_TABLE, conf);
+
+        IteratorSetting iteratorSetting = new IteratorSetting(
+                15,
+                "prospectsSumming",
+                SummingCombiner.class
+        );
+        LongCombiner.setEncodingType(iteratorSetting, LongCombiner.Type.STRING);
+        Combiner.setColumns(iteratorSetting, Collections.singletonList(new IteratorSetting.Column(ProspectorConstants.COUNT)));
+        connector.tableOperations().attachIterator(OUT_TABLE, iteratorSetting);
     }
 
     @After
     public void after() throws IOException, InterruptedException {
         accumulo.stop();
         FileUtils.forceDelete(tempDir);
+    }
+
+    @Test
+    public void testWithAvroAsIntermediate() throws Exception {
+        // Load some data into Accumulo
+        final AccumuloRyaDAO ryaDAO = new AccumuloRyaDAO();
+        ryaDAO.setConnector(connector);
+        ryaDAO.init();
+
+        ryaDAO.add(new RyaStatement(
+                new RyaIRI("urn:gem:etype#1234"), new RyaIRI("urn:gem#pred"), new RyaType("mydata1"))); //2
+        ryaDAO.add(new RyaStatement(
+                new RyaIRI("urn:gem:etype#1234"), new RyaIRI("urn:gem#pred"), new RyaType("mydata2"))); //3
+        ryaDAO.add(new RyaStatement(
+                new RyaIRI("urn:gem:etype#1234"), new RyaIRI("urn:gem#pred"), new RyaType("12"))); //1
+        ryaDAO.add(new RyaStatement(
+                new RyaIRI("urn:gem:etype#1235"), new RyaIRI("urn:gem#pred"), new RyaType(XMLSchema.INTEGER, "12"))); //4
+        ryaDAO.add(new RyaStatement(
+                new RyaIRI("urn:gem:etype#1235"), new RyaIRI("urn:gem#pred1"), new RyaType("12"))); //5
+
+        ryaDAO.destroy();
+
+        SortedSet<Text> splits = new TreeSet<>();
+        splits.add(new Text("urn:gem:etype#1234"));
+        connector.tableOperations().addSplits(IN_TABLE, splits);
+
+        // Run the pipeline
+        BuildTriplePatternCountTablePipelineOptions options = PipelineOptionsFactory
+                .as(BuildTriplePatternCountTablePipelineOptions.class);
+
+        options.setAccumuloName(accumulo.getInstanceName());
+        options.setZookeeperServers(accumulo.getZooKeepers());
+        options.setAccumuloUsername(ACCUMULO_USERNAME);
+        options.setAccumuloPassword(ACCUMULO_PASSWORD);
+        options.setSource(IN_TABLE);
+        options.setDestination(tempDir.getAbsolutePath() + "/pipeline-output/prospect");
+        options.setBatchSize(2);
+
+        BuildTriplePatternCountTablePipeline
+                .createFetchOnly(options)
+                .run()
+                .waitUntilFinish();
+
+        options.setSource(tempDir.getAbsolutePath() + "/pipeline-output/prospect-*.avro");
+        options.setDestination(OUT_TABLE);
+
+        BuildTriplePatternCountTablePipeline
+                .createCombinerAndWriter(options)
+                .run()
+                .waitUntilFinish();
+
+        final ProspectorService service = new ProspectorService(connector, OUT_TABLE);
+        final String[] auths = {"U", "FOUO"};
+
+        // Ensure one of the correct "subject" counts was created.
+        List<String> queryTerms = new ArrayList<>();
+        queryTerms = new ArrayList<>();
+        queryTerms.add("urn:gem:etype#1234");
+        final List<IndexEntry> subjectEntries = service.query(
+                null,
+                ProspectorConstants.COUNT,
+                TripleValueType.SUBJECT.getIndexType(),
+                queryTerms,
+                XMLSchema.ANYURI.stringValue(),
+                auths);
+        assertEquals(subjectEntries.size(), 1);
     }
 
     @Test
@@ -118,10 +186,10 @@ public class BuildTriplePatternCountTablePipelineTest {
         options.setZookeeperServers(accumulo.getZooKeepers());
         options.setAccumuloUsername(ACCUMULO_USERNAME);
         options.setAccumuloPassword(ACCUMULO_PASSWORD);
-        options.setInTable(IN_TABLE);
-        options.setOutTable(OUT_TABLE);
-        options.setBatchSize(1);
-        options.setNumParallelBatches(2);
+        options.setSource(IN_TABLE);
+        options.setDestination(OUT_TABLE);
+        options.setBatchSize(2);
+
         BuildTriplePatternCountTablePipeline
                 .create(options)
                 .run()
@@ -333,10 +401,10 @@ public class BuildTriplePatternCountTablePipelineTest {
         options.setZookeeperServers(accumulo.getZooKeepers());
         options.setAccumuloUsername(ACCUMULO_USERNAME);
         options.setAccumuloPassword(ACCUMULO_PASSWORD);
-        options.setInTable(IN_TABLE);
-        options.setOutTable(OUT_TABLE);
-        options.setBatchSize(1);
-        options.setNumParallelBatches(1);
+        options.setSource(IN_TABLE);
+        options.setDestination(OUT_TABLE);
+        options.setBatchSize(2);
+
         BuildTriplePatternCountTablePipeline
                 .create(options)
                 .run()
