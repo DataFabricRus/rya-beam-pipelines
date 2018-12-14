@@ -1,6 +1,7 @@
 package cc.datafabric.pipelines.io;
 
 import cc.datafabric.pipelines.coders.MapEntryCoder;
+import com.google.common.primitives.Bytes;
 import org.apache.accumulo.core.client.*;
 import org.apache.accumulo.core.client.security.tokens.PasswordToken;
 import org.apache.accumulo.core.data.Key;
@@ -8,6 +9,9 @@ import org.apache.accumulo.core.data.Range;
 import org.apache.accumulo.core.data.Value;
 import org.apache.accumulo.core.iterators.SortedKeyValueIterator;
 import org.apache.accumulo.core.security.Authorizations;
+import org.apache.beam.sdk.coders.IterableCoder;
+import org.apache.beam.sdk.coders.KvCoder;
+import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.hadoop.WritableCoder;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -15,20 +19,22 @@ import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.Reshuffle;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.hadoop.io.Text;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
-import java.util.Arrays;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-public class AccumuloReadAll
-        extends PTransform<PCollection<String>, PCollection<Map.Entry<Key, Value>>>
+import static org.apache.rya.api.RdfCloudTripleStoreConstants.DELIM_BYTE;
+
+public class RyaReadAllGroupBySubject
+        extends PTransform<PCollection<String>, PCollection<KV<String, Iterable<Map.Entry<Key, Value>>>>>
         implements Serializable {
 
-    private static final Logger LOG = LoggerFactory.getLogger(AccumuloReadAll.class);
+    private static final Logger LOG = LoggerFactory.getLogger(RyaReadAllGroupBySubject.class);
 
     private final String instanceName;
     private final String zookeeperServers;
@@ -38,9 +44,9 @@ public class AccumuloReadAll
     private final Class<? extends SortedKeyValueIterator<Key, Value>> iteratorClass;
     private final Map<String, String> iteratorOptions;
 
-    AccumuloReadAll(String instanceName, String zookeeperServers, String username, String password,
-                    int iteratorPriority, Class<? extends SortedKeyValueIterator<Key, Value>> iteratorClass,
-                    Map<String, String> iteratorOptions) {
+    public RyaReadAllGroupBySubject(String instanceName, String zookeeperServers, String username, String password,
+                                    int iteratorPriority, Class<? extends SortedKeyValueIterator<Key, Value>> iteratorClass,
+                                    Map<String, String> iteratorOptions) {
         this.instanceName = instanceName;
         this.zookeeperServers = zookeeperServers;
         this.username = username;
@@ -51,15 +57,15 @@ public class AccumuloReadAll
     }
 
     @Override
-    public PCollection<Map.Entry<Key, Value>> expand(PCollection<String> input) {
+    public PCollection<KV<String, Iterable<Map.Entry<Key, Value>>>> expand(PCollection<String> input) {
         return input
                 .apply(new AccumuloFetchSplits(instanceName, zookeeperServers, username, password))
                 .apply(Reshuffle.viaRandomKey())
-                .apply(ParDo.of(new DoFn<KV<String, Range>, Map.Entry<Key, Value>>() {
+                .apply(ParDo.of(new DoFn<KV<String, Range>, KV<String, Iterable<Map.Entry<Key, Value>>>>() {
 
                     @ProcessElement
                     public void processElement(@Element KV<String, Range> element,
-                                               OutputReceiver<Map.Entry<Key, Value>> receiver)
+                                               OutputReceiver<KV<String, Iterable<Map.Entry<Key, Value>>>> receiver)
                             throws Exception {
                         final Instance instance = new ZooKeeperInstance(instanceName, zookeeperServers);
                         final Connector connector = instance.getConnector(username, new PasswordToken(password));
@@ -78,13 +84,52 @@ public class AccumuloReadAll
                                 }
                             }
 
-                            scanner.forEach(receiver::output);
+                            String previousSubject = null;
+                            List<Map.Entry<Key, Value>> buffer = new ArrayList<>();
+                            for (Map.Entry<Key, Value> entry : scanner) {
+                                final String currentSubject = extractSubject(entry.getKey());
+
+                                if (currentSubject != null) {
+                                    if (previousSubject == null) {
+                                        previousSubject = currentSubject;
+
+                                        buffer.add(entry);
+                                    } else if (previousSubject.equals(currentSubject)) {
+                                        buffer.add(entry);
+                                    } else {
+                                        receiver.output(KV.of(previousSubject, buffer));
+
+                                        buffer = new ArrayList<>();
+                                        buffer.add(entry);
+                                        previousSubject = currentSubject;
+                                    }
+                                }
+                            }
+
+                            if (previousSubject != null && !buffer.isEmpty()) {
+                                //Output the last buffer
+                                receiver.output(KV.of(previousSubject, buffer));
+                            }
                         }
 
                         LOG.info("Finished reading a range [{} -> {}]",
                                 element.getValue().getStartKey(), element.getValue().getEndKey());
                     }
                 }))
-                .setCoder(MapEntryCoder.of(WritableCoder.of(Key.class), WritableCoder.of(Value.class)));
+                .setCoder(KvCoder.of(
+                        StringUtf8Coder.of(),
+                        IterableCoder.of(MapEntryCoder.of(WritableCoder.of(Key.class), WritableCoder.of(Value.class)))
+                ));
+    }
+
+    private String extractSubject(Key key) {
+        try {
+            byte[] row = key.getRow().getBytes();
+            int indexTo = Bytes.indexOf(row, DELIM_BYTE);
+
+            return new String(row, 0, indexTo, StandardCharsets.UTF_8);
+        } catch (IndexOutOfBoundsException __) {
+            return null;
+        }
     }
 }

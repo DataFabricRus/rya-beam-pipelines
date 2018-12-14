@@ -1,5 +1,7 @@
-package cc.datafabric.pipelines;
+package cc.datafabric.pipelines.statistics;
 
+import cc.datafabric.pipelines.AvroContainer;
+import cc.datafabric.pipelines.GroupIntoLocalBatches;
 import cc.datafabric.pipelines.coders.IntermediateProspectCoder;
 import cc.datafabric.pipelines.coders.MapEntryCoder;
 import cc.datafabric.pipelines.coders.MutationCoder;
@@ -58,7 +60,7 @@ interface BuildTriplePatternCountTablePipelineOptions extends DefaultRyaPipeline
 
     String getSource();
 
-    void setSource(String tableId);
+    void setSource(String source);
 
     String getDestination();
 

@@ -1,4 +1,4 @@
-package cc.datafabric.pipelines;
+package cc.datafabric.pipelines.statistics;
 
 import com.google.common.collect.Lists;
 import org.apache.accumulo.core.client.Connector;

@@ -12,6 +12,8 @@
         <apache.beam.version>2.6.0</apache.beam.version>
         <apache.accumulo.version>1.9.2</apache.accumulo.version>
         <apache.rya.version>4.0.0-incubating-SNAPSHOT</apache.rya.version>
+        <rdf4j.version>2.4.2</rdf4j.version>
+        <elasticsearch.version>5.6.9</elasticsearch.version>
         <slf4j.version>1.7.25</slf4j.version>
     </properties>
 
@@ -59,7 +61,16 @@
                     <groupId>commons-logging</groupId>
                     <artifactId>commons-logging</artifactId>
                 </exclusion>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>log4j-over-slf4j</artifactId>
+                </exclusion>
             </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.rya</groupId>
+            <artifactId>accumulo.iterators</artifactId>
+            <version>${apache.rya.version}</version>
         </dependency>
         <dependency>
             <groupId>org.apache.rya</groupId>
@@ -72,9 +83,9 @@
             <version>${slf4j.version}</version>
         </dependency>
         <dependency>
-            <groupId>ch.qos.logback</groupId>
-            <artifactId>logback-classic</artifactId>
-            <version>1.2.3</version>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-log4j12</artifactId>
+            <version>${slf4j.version}</version>
         </dependency>
         <dependency>
             <groupId>org.apache.beam</groupId>
@@ -90,7 +101,7 @@
         <dependency>
             <groupId>com.google.guava</groupId>
             <artifactId>guava</artifactId>
-            <version>23.0</version>
+            <version>26.0-jre</version>
         </dependency>
         <dependency>
             <groupId>com.google.protobuf</groupId>
@@ -102,6 +113,21 @@
             <artifactId>beam-sdks-java-io-google-cloud-platform</artifactId>
             <version>${apache.beam.version}</version>
         </dependency>
+        <dependency>
+            <groupId>org.eclipse.rdf4j</groupId>
+            <artifactId>rdf4j-sail-elasticsearch</artifactId>
+            <version>${rdf4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.elasticsearch.client</groupId>
+            <artifactId>transport</artifactId>
+            <version>${elasticsearch.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.locationtech.spatial4j</groupId>
+            <artifactId>spatial4j</artifactId>
+            <version>0.6</version>
+        </dependency>
 
         <!-- Test dependencies -->
         <dependency>
@@ -109,6 +135,18 @@
             <artifactId>accumulo-minicluster</artifactId>
             <version>${apache.accumulo.version}</version>
             <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>pl.allegro.tech</groupId>
+            <artifactId>embedded-elasticsearch</artifactId>
+            <version>2.7.0</version>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>commons-logging</groupId>
+                    <artifactId>commons-logging</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
     </dependencies>
 
