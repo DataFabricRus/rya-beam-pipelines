@@ -20,7 +20,6 @@ import org.apache.accumulo.core.iterators.LongCombiner;
 import org.apache.accumulo.core.iterators.user.SummingCombiner;
 import org.apache.accumulo.core.security.ColumnVisibility;
 import org.apache.beam.sdk.Pipeline;
-import org.apache.beam.sdk.PipelineRunner;
 import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
@@ -443,29 +442,43 @@ class BuildTriplePatternCountTablePipeline {
         }
     }
 
+    /**
+     * There are two options to run the pipeline:
+     * * Option A - read from the SPO index and write to the prospects index without an intermediate step,
+     * * Option B - do the same, but with an intermediate step that stores the index in a Google Storage.
+     */
     public static void main(String[] args) throws ClassNotFoundException {
         BuildTriplePatternCountTablePipelineOptions options = PipelineOptionsFactory
                 .as(BuildTriplePatternCountTablePipelineOptions.class);
 
-        options.setJobName("rya-prospects");
-        options.setProject("core-datafabric");
-        options.setRegion("europe-west1");
-        options.setTempLocation("gs://datafabric-dataflow/temp");
-        options.setGcpTempLocation("gs://datafabric-dataflow/staging");
-        options.setRunner((Class<PipelineRunner<?>>) Class.forName("org.apache.beam.runners.dataflow.DataflowRunner"));
-//        options.setRunner((Class<PipelineRunner<?>>) Class.forName("org.apache.beam.runners.direct.DirectRunner"));
-        options.setMaxNumWorkers(40);
+        /*
+         * Option A:
+         * To read from the SPO index and write to the prospects index
+         */
+//        options.setJobName("rya-prospects");
+//        options.setProject("core-datafabric");
+//        options.setRegion("europe-west1");
+//        options.setTempLocation("gs://datafabric-dataflow/temp");
+//        options.setGcpTempLocation("gs://datafabric-dataflow/staging");
+//        options.setRunner((Class<PipelineRunner<?>>) Class.forName("org.apache.beam.runners.dataflow.DataflowRunner"));
+////        options.setRunner((Class<PipelineRunner<?>>) Class.forName("org.apache.beam.runners.direct.DirectRunner"));
+//        options.setMaxNumWorkers(40);
+//
+//        options.setAccumuloName("accumulo");
+//        options.setZookeeperServers("10.132.0.18:2181");
+//        options.setAccumuloUsername("root");
+//        options.setAccumuloPassword("accumulo");
+//
+//        options.setBatchSize(1000000);
+//
+//        options.setSource("triplestore_spo");
+//        options.setDestination("triplestore_prospects");
+//        Pipeline p = BuildTriplePatternCountTablePipeline.create(options);
+//        p.run();
 
-        options.setAccumuloName("accumulo");
-        options.setZookeeperServers("10.132.0.18:2181");
-        options.setAccumuloUsername("root");
-        options.setAccumuloPassword("accumulo");
-
-        options.setBatchSize(1000000);
-
-        options.setSource("triplestore_spo");
-        options.setDestination("triplestore_prospects");
-        Pipeline p = BuildTriplePatternCountTablePipeline.create(options);
+        /*
+         * Option B:
+         */
 
         /*
          * To read from the SPO index and write the prospects to files.
@@ -475,6 +488,7 @@ class BuildTriplePatternCountTablePipeline {
 //        options.setSource("triplestore_spo");
 //        options.setDestination("gs://datafabric-rya-dev/prospects/prospect");
 //        Pipeline p = BuildTriplePatternCountTablePipeline.createFetchOnly(options);
+//        p.run();
 
         /*
          * To read prospects from files, aggregate and write them to a table.
@@ -484,8 +498,7 @@ class BuildTriplePatternCountTablePipeline {
 //        options.setSource("gs://datafabric-rya-dev/prospects/prospect-*.avro");
 //        options.setDestination("triplestore_prospects");
 //        Pipeline p = BuildTriplePatternCountTablePipeline.createCombinerAndWriter(options);
-
-        p.run();
+//        p.run();
     }
 
 }

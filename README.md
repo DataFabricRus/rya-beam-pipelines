@@ -2,6 +2,7 @@
 
 Pipelines:
 
+* `bulkload` - loads RDF in the triplestore,
 * `statistics` - reads triples from the SPO index, generates statistics (aka [Prospects Table](https://github.com/apache/incubator-rya/blob/master/extras/rya.manual/src/site/markdown/eval.md)) about the triples and writes them to a separate index.
 * `elasticsearch` - reads triples from the SPO index, generates the full text index and writes it in Elasticsearch.
 
