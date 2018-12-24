@@ -59,6 +59,7 @@ public class BuildTriplePatternCountTablePipelineTest {
         assert tempDir.mkdirs();
 
         accumulo = new MiniAccumuloCluster(tempDir, ACCUMULO_PASSWORD);
+        accumulo.getConfig().setZooKeeperStartupTime(60000);
         accumulo.start();
 
         Instance instance = new ZooKeeperInstance(accumulo.getInstanceName(), accumulo.getZooKeepers());

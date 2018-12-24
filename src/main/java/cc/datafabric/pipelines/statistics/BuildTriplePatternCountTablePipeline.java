@@ -7,6 +7,7 @@ import cc.datafabric.pipelines.coders.MapEntryCoder;
 import cc.datafabric.pipelines.coders.MutationCoder;
 import cc.datafabric.pipelines.coders.RangeCoder;
 import cc.datafabric.pipelines.io.AccumuloIO;
+import cc.datafabric.pipelines.io.AccumuloSingleTableWrite;
 import cc.datafabric.pipelines.options.DefaultRyaPipelineOptions;
 import org.apache.accumulo.core.client.*;
 import org.apache.accumulo.core.client.admin.NewTableConfiguration;
@@ -20,6 +21,7 @@ import org.apache.accumulo.core.iterators.LongCombiner;
 import org.apache.accumulo.core.iterators.user.SummingCombiner;
 import org.apache.accumulo.core.security.ColumnVisibility;
 import org.apache.beam.sdk.Pipeline;
+import org.apache.beam.sdk.PipelineRunner;
 import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
@@ -89,7 +91,7 @@ class BuildTriplePatternCountTablePipeline {
 
         p
                 .apply(Create.of(options.getSource()))
-                .apply(new PrepareDestinationTable<>())
+                .apply("Prepare tables", new PrepareDestinationTable<>())
                 .apply(new AccumuloIO.Read(
                         options.getAccumuloName(), options.getZookeeperServers(),
                         options.getAccumuloUsername(), options.getAccumuloPassword()
@@ -99,7 +101,13 @@ class BuildTriplePatternCountTablePipeline {
                 .apply(new AggregateProspects())
                 .apply(new ProspectToMutation())
                 .apply(GroupIntoLocalBatches.of(options.getBatchSize()))
-                .apply(new WriteMutations());
+                .apply("Write Mutations", new AccumuloSingleTableWrite(
+                        options.getAccumuloName(),
+                        options.getZookeeperServers(),
+                        options.getAccumuloUsername(),
+                        options.getAccumuloPassword(),
+                        options.getDestination()
+                ));
 
         return p;
     }
@@ -140,10 +148,9 @@ class BuildTriplePatternCountTablePipeline {
         Pipeline p = preparePipeline(options);
 
         p
-                .apply(AvroIO
-                        .read(AvroContainer.class)
-                        .from(options.getSource())
-                )
+                .apply(Create.of(options.getSource()))
+                .apply("Prepare tables",new PrepareDestinationTable<>())
+                .apply(AvroIO.readAll(AvroContainer.class))
                 .apply("Unpack prospect", ParDo.of(new DoFn<AvroContainer, Map.Entry<IntermediateProspect, Long>>() {
 
                     @ProcessElement
@@ -168,7 +175,13 @@ class BuildTriplePatternCountTablePipeline {
                 .apply("Aggregate prospects", new AggregateProspects())
                 .apply("Prospect to mutation", new ProspectToMutation())
                 .apply(GroupIntoLocalBatches.of(options.getBatchSize()))
-                .apply("Write mutations", new WriteMutations());
+                .apply("Write mutations", new AccumuloSingleTableWrite(
+                        options.getAccumuloName(),
+                        options.getZookeeperServers(),
+                        options.getAccumuloUsername(),
+                        options.getAccumuloPassword(),
+                        options.getDestination()
+                ));
 
         return p;
     }
@@ -413,35 +426,6 @@ class BuildTriplePatternCountTablePipeline {
         }
     }
 
-    private static class WriteMutations extends PTransform<PCollection<Iterable<Mutation>>, PCollection<Boolean>> {
-        @Override
-        public PCollection<Boolean> expand(PCollection<Iterable<Mutation>> input) {
-            return input.apply(ParDo.of(new DoFn<Iterable<Mutation>, Boolean>() {
-
-                @ProcessElement
-                public void processElement(ProcessContext ctx) throws Exception {
-                    final Iterable<Mutation> mutations = ctx.element();
-
-                    final BuildTriplePatternCountTablePipelineOptions options = ctx.getPipelineOptions()
-                            .as(BuildTriplePatternCountTablePipelineOptions.class);
-
-                    final Instance instance = new ZooKeeperInstance(
-                            options.getAccumuloName(), options.getZookeeperServers());
-                    final Connector conn = instance.getConnector(
-                            options.getAccumuloUsername(), new PasswordToken(options.getAccumuloPassword()));
-                    final BatchWriterConfig config = new BatchWriterConfig();
-
-                    try (BatchWriter writer = conn.createBatchWriter(options.getDestination(), config)) {
-                        writer.addMutations(mutations);
-                    }
-
-                    ctx.output(true);
-                }
-
-            }));
-        }
-    }
-
     /**
      * There are two options to run the pipeline:
      * * Option A - read from the SPO index and write to the prospects index without an intermediate step,
@@ -451,23 +435,25 @@ class BuildTriplePatternCountTablePipeline {
         BuildTriplePatternCountTablePipelineOptions options = PipelineOptionsFactory
                 .as(BuildTriplePatternCountTablePipelineOptions.class);
 
+        options.setProject("core-datafabric");
+        options.setRegion("europe-west1");
+        options.setTempLocation("gs://datafabric-dataflow/temp");
+        options.setGcpTempLocation("gs://datafabric-dataflow/staging");
+
+        options.setRunner((Class<PipelineRunner<?>>) Class.forName("org.apache.beam.runners.dataflow.DataflowRunner"));
+//      options.setRunner((Class<PipelineRunner<?>>) Class.forName("org.apache.beam.runners.direct.DirectRunner"));
+
+        options.setAccumuloName("accumulo");
+        options.setZookeeperServers("10.132.0.18:2181");
+        options.setAccumuloUsername("root");
+        options.setAccumuloPassword("accumulo");
+
         /*
          * Option A:
          * To read from the SPO index and write to the prospects index
          */
 //        options.setJobName("rya-prospects");
-//        options.setProject("core-datafabric");
-//        options.setRegion("europe-west1");
-//        options.setTempLocation("gs://datafabric-dataflow/temp");
-//        options.setGcpTempLocation("gs://datafabric-dataflow/staging");
-//        options.setRunner((Class<PipelineRunner<?>>) Class.forName("org.apache.beam.runners.dataflow.DataflowRunner"));
-////        options.setRunner((Class<PipelineRunner<?>>) Class.forName("org.apache.beam.runners.direct.DirectRunner"));
 //        options.setMaxNumWorkers(40);
-//
-//        options.setAccumuloName("accumulo");
-//        options.setZookeeperServers("10.132.0.18:2181");
-//        options.setAccumuloUsername("root");
-//        options.setAccumuloPassword("accumulo");
 //
 //        options.setBatchSize(1000000);
 //
@@ -485,20 +471,28 @@ class BuildTriplePatternCountTablePipeline {
          */
 //        options.setJobName("rya-prospects-fetchonly");
 //        options.setMaxNumWorkers(40);
+//
 //        options.setSource("triplestore_spo");
 //        options.setDestination("gs://datafabric-rya-dev/prospects/prospect");
+//
+//        options.setBatchSize(500000);
+//
 //        Pipeline p = BuildTriplePatternCountTablePipeline.createFetchOnly(options);
 //        p.run();
 
         /*
          * To read prospects from files, aggregate and write them to a table.
          */
-//        options.setJobName("rya-prospects-combineandwrite");
-//        options.setMaxNumWorkers(20);
-//        options.setSource("gs://datafabric-rya-dev/prospects/prospect-*.avro");
-//        options.setDestination("triplestore_prospects");
-//        Pipeline p = BuildTriplePatternCountTablePipeline.createCombinerAndWriter(options);
-//        p.run();
+        options.setJobName("rya-prospects-combineandwrite");
+        options.setMaxNumWorkers(20);
+
+        options.setSource("gs://datafabric-rya-dev/prospects/prospect-*.avro");
+        options.setDestination("triplestore_prospects");
+
+        options.setBatchSize(500000);
+
+        Pipeline p = BuildTriplePatternCountTablePipeline.createCombinerAndWriter(options);
+        p.run();
     }
 
 }

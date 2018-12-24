@@ -10,7 +10,7 @@
 
     <properties>
         <apache.beam.version>2.6.0</apache.beam.version>
-        <apache.accumulo.version>1.9.2</apache.accumulo.version>
+        <apache.accumulo.version>1.9.3-SNAPSHOT</apache.accumulo.version>
         <apache.rya.version>4.0.0-incubating-SNAPSHOT</apache.rya.version>
         <rdf4j.version>2.4.2</rdf4j.version>
         <elasticsearch.version>5.6.9</elasticsearch.version>
