@@ -1,10 +1,11 @@
 package cc.datafabric.pipelines.io;
 
-import cc.datafabric.pipelines.GroupIntoLocalBatches;
+import cc.datafabric.pipelines.transforms.GroupIntoLocalBatches;
 import cc.datafabric.pipelines.coders.RDF4JModelCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.TextIO;
+import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.transforms.*;
 import org.apache.beam.sdk.values.*;
 import org.eclipse.rdf4j.model.Model;
@@ -16,7 +17,6 @@ import org.slf4j.LoggerFactory;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.StringReader;
-import java.util.Arrays;
 import java.util.Optional;
 import java.util.regex.Pattern;
 
@@ -75,7 +75,7 @@ public class RDF4JIO {
                         mor.get(FILE_BASED).output(filePattern);
                     }
                 } else {
-                    LOG.warn("File pattern [{}] couldn't be matched with any RDF format! Skipping it.", filePattern);
+                    mor.get(FILE_BASED).output(filePattern);
                 }
             }
 
@@ -85,10 +85,10 @@ public class RDF4JIO {
 
             @ProcessElement
             public void processElement(@Element FileIO.ReadableFile file, OutputReceiver<Model> out) {
-                Optional<RDFFormat> format = Rio.getParserFormatForFileName(
-                        file.getMetadata().resourceId().getFilename());
+                ResourceId resourceId = file.getMetadata().resourceId();
+                Optional<RDFFormat> format = Rio.getParserFormatForFileName(resourceId.getFilename());
 
-                if (format.isPresent()) {
+                if (!resourceId.isDirectory() && format.isPresent()) {
                     try (ByteArrayInputStream bai = new ByteArrayInputStream(file.readFullyAsBytes())) {
                         Model model = Rio.parse(bai, "", format.get());
 

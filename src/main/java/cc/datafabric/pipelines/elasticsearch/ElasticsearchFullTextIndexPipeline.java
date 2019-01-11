@@ -1,9 +1,8 @@
 package cc.datafabric.pipelines.elasticsearch;
 
-import cc.datafabric.pipelines.GroupIntoLocalBatches;
-import cc.datafabric.pipelines.io.MapHelpers;
-import cc.datafabric.pipelines.io.RyaReadAllGroupBySubject;
+import cc.datafabric.pipelines.io.*;
 import cc.datafabric.pipelines.options.DefaultRyaPipelineOptions;
+import cc.datafabric.pipelines.transforms.GroupIntoLocalBatches;
 import org.apache.accumulo.core.client.IteratorSetting;
 import org.apache.accumulo.core.data.Key;
 import org.apache.accumulo.core.data.Value;
@@ -11,10 +10,7 @@ import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineRunner;
 import org.apache.beam.sdk.io.hadoop.WritableCoder;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.sdk.transforms.Create;
-import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.PTransform;
-import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.*;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.rya.accumulo.iterators.RDFPropertyFilter;
@@ -33,6 +29,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -44,8 +42,6 @@ interface ElasticsearchFullTextIndexPipelineOptions extends DefaultRyaPipelineOp
 
     /**
      * The SPO table name.
-     *
-     * @return
      */
     String getSource();
 
@@ -62,6 +58,17 @@ interface ElasticsearchFullTextIndexPipelineOptions extends DefaultRyaPipelineOp
     int getBatchSize();
 
     void setBatchSize(int batchSize);
+
+    String getStartDateTime();
+
+    /**
+     * If not set, will try to read it from Zookeeper.
+     */
+    void setStartDateTime(String startDateTime);
+
+    String getEndDateTime();
+
+    void setEndDateTime(String endDateTime);
 }
 
 class ElasticsearchFullTextIndexPipeline {
@@ -73,17 +80,70 @@ class ElasticsearchFullTextIndexPipeline {
 
         p
                 .apply(Create.of(options.getSource()))
-                .apply(
-                        new RyaReadAllGroupBySubject(
-                                options.getAccumuloName(), options.getZookeeperServers(),
-                                options.getAccumuloUsername(), options.getAccumuloPassword(),
-                                1000, RDFPropertyFilter.class,
-                                MapHelpers.singletonMap(RDFPropertyFilter.OPTION_PROPERTIES, options.getProperties())
-                        )
-                )
+                .apply("Fetch Splits", new AccumuloFetchSplits(
+                        options.getAccumuloName(),
+                        options.getZookeeperServers(),
+                        options.getAccumuloUsername(),
+                        options.getAccumuloPassword()
+                ))
+                .apply(Reshuffle.viaRandomKey())
+                .apply(new AccumuloReadAndGroupByRyaSubject(
+                        options.getAccumuloName(), options.getZookeeperServers(),
+                        options.getAccumuloUsername(), options.getAccumuloPassword(),
+                        1000, RDFPropertyFilter.class,
+                        MapHelpers.singletonMap(RDFPropertyFilter.OPTION_PROPERTIES, options.getProperties())
+                ))
                 .apply(new SubjectGroupToStatementGroup())
                 .apply(GroupIntoLocalBatches.of(options.getBatchSize()))
-                .apply(new WriteStatementToIndex(options.getElasticsearchHost()));
+                .apply(new WriteStatementToIndex(options.getElasticsearchHost()))
+                .apply(new WaitEndAndWriteTimestamp(
+                        options.getAccumuloName(),
+                        options.getZookeeperServers(),
+                        options.getAccumuloUsername(),
+                        options.getAccumuloPassword(),
+                        options.getEndDateTime()
+                ));
+
+        return p;
+    }
+
+    public static Pipeline createWithTimestampFilter(ElasticsearchFullTextIndexPipelineOptions options) {
+        Pipeline p = preparePipeline(options);
+
+        p
+                .apply(Create.of(options.getSource()))
+                .apply("Fetch Splits", new AccumuloFetchSplits(
+                        options.getAccumuloName(),
+                        options.getZookeeperServers(),
+                        options.getAccumuloUsername(),
+                        options.getAccumuloPassword()
+                ))
+                .apply(Reshuffle.viaRandomKey())
+                .apply("Filter by start and end time", new AccumuloFilterRangesByTimestamp(
+                        options.getAccumuloName(),
+                        options.getZookeeperServers(),
+                        options.getAccumuloUsername(),
+                        options.getAccumuloPassword(),
+                        options.getStartDateTime(),
+                        options.getEndDateTime(),
+                        options.getProperties()
+                ))
+                .apply(new AccumuloReadAndGroupByRyaSubject(
+                        options.getAccumuloName(), options.getZookeeperServers(),
+                        options.getAccumuloUsername(), options.getAccumuloPassword(),
+                        1000, RDFPropertyFilter.class,
+                        MapHelpers.singletonMap(RDFPropertyFilter.OPTION_PROPERTIES, options.getProperties())
+                ))
+                .apply(new SubjectGroupToStatementGroup())
+                .apply(GroupIntoLocalBatches.of(options.getBatchSize()))
+                .apply(new WriteStatementToIndex(options.getElasticsearchHost()))
+                .apply(new WaitEndAndWriteTimestamp(
+                        options.getAccumuloName(),
+                        options.getZookeeperServers(),
+                        options.getAccumuloUsername(),
+                        options.getAccumuloPassword(),
+                        options.getEndDateTime()
+                ));
 
         return p;
     }
@@ -188,8 +248,9 @@ class ElasticsearchFullTextIndexPipeline {
             }
 
             @ProcessElement
-            public void processElement(@Element Iterable<KV<String, Iterable<Statement>>> documents)
-                    throws IOException {
+            public void processElement(
+                    @Element Iterable<KV<String, Iterable<Statement>>> documents, OutputReceiver<Boolean> receiver
+            ) throws IOException {
                 long start = System.currentTimeMillis();
 
                 BulkUpdater bulkUpdater = index.newBulkUpdate();
@@ -215,6 +276,8 @@ class ElasticsearchFullTextIndexPipeline {
                 }
 
                 bulkUpdater.end();
+
+                receiver.output(true);
 
                 LOG.info("Wrote a batch in {} ms", System.currentTimeMillis() - start);
             }
@@ -243,7 +306,7 @@ class ElasticsearchFullTextIndexPipeline {
 
     }
 
-    public static void main(String[] args) throws ClassNotFoundException    {
+    public static void main(String[] args) throws ClassNotFoundException {
         ElasticsearchFullTextIndexPipelineOptions options = PipelineOptionsFactory
                 .as(ElasticsearchFullTextIndexPipelineOptions.class);
 
@@ -265,16 +328,20 @@ class ElasticsearchFullTextIndexPipeline {
         options.setElasticsearchHost("rya-cluster-e");
         options.setBatchSize(100);
         options.setProperties(new String[]{
-                "http://www.w3.org/2000/01/rdf-schema#label",
+                //"http://www.w3.org/2000/01/rdf-schema#label",
                 "http://www.w3.org/2004/02/skos/core#prefLabel",
                 "http://www.w3.org/2004/02/skos/core#notation",
-                "https://spec.edmcouncil.org/fibo/ontology/FND/AgentsAndPeople/Agents/hasName",
-                "https://spec.edmcouncil.org/fibo/ontology/FND/Relations/Relations/hasLegalName",
-                "https://spec.edmcouncil.org/fibo/ontology/FND/Relations/Relations/hasAlias",
-                "https://spec.edmcouncil.org/fibo/ontology/FND/Relations/Relations/hasUniqueIdentifier"
+                //"https://spec.edmcouncil.org/fibo/ontology/FND/AgentsAndPeople/Agents/hasName",
+                //"https://spec.edmcouncil.org/fibo/ontology/FND/Relations/Relations/hasLegalName",
+                //"https://spec.edmcouncil.org/fibo/ontology/FND/Relations/Relations/hasAlias",
+                //"https://spec.edmcouncil.org/fibo/ontology/FND/Relations/Relations/hasUniqueIdentifier"
         });
 
-        Pipeline p = ElasticsearchFullTextIndexPipeline.create(options);
+//        Pipeline p = ElasticsearchFullTextIndexPipeline.create(options);
+
+        options.setStartDateTime("2018-01-01T00:00:00Z");
+        options.setEndDateTime(DateTimeFormatter.ISO_DATE_TIME.format(ZonedDateTime.now()));
+        Pipeline p = ElasticsearchFullTextIndexPipeline.createWithTimestampFilter(options);
 
         p.run();
     }

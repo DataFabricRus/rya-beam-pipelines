@@ -1,13 +1,16 @@
 package cc.datafabric.pipelines.bulkload;
 
-import cc.datafabric.pipelines.GroupIntoLocalBatches;
+import cc.datafabric.pipelines.transforms.GroupIntoLocalBatches;
 import cc.datafabric.pipelines.coders.MutationCoder;
 import cc.datafabric.pipelines.coders.RDF4JModelCoder;
 import cc.datafabric.pipelines.coders.RDFFormatCoder;
 import cc.datafabric.pipelines.io.AccumuloSingleTableWrite;
 import cc.datafabric.pipelines.io.RDF4JIO;
 import cc.datafabric.pipelines.options.DefaultRyaPipelineOptions;
+import cc.datafabric.pipelines.statistics.StatisticsPipeline;
+import cc.datafabric.pipelines.transforms.CreateProspects;
 import org.apache.accumulo.core.client.*;
+import org.apache.accumulo.core.client.admin.NewTableConfiguration;
 import org.apache.accumulo.core.client.admin.TableOperations;
 import org.apache.accumulo.core.client.security.tokens.PasswordToken;
 import org.apache.accumulo.core.data.Mutation;
@@ -46,6 +49,10 @@ interface BulkLoadPipelineOptions extends DefaultRyaPipelineOptions {
 
     void setDestinationTablePrefix(String tablePrefix);
 
+    String getStatisticsTable();
+
+    void setStatisticsTable(String tableName);
+
     long getBatchSize();
 
     void setBatchSize(long batchSize);
@@ -78,10 +85,64 @@ public class BulkLoadPipeline {
                         .withOutputTags(SPO_MUTATIONS, TupleTagList.of(Arrays.asList(PO_MUTATIONS, OSP_MUTATIONS)))
                 );
 
+        writeMutations(options, mutations);
+
+        return p;
+    }
+
+    static Pipeline createLoadAndStatistics(BulkLoadPipelineOptions options) {
+        Pipeline p = Pipeline.create(options);
+
+        p.getCoderRegistry().registerCoderForClass(RDFFormat.class, RDFFormatCoder.of());
+        p.getCoderRegistry().registerCoderForClass(Model.class, RDF4JModelCoder.of());
+
+        PCollection<Model> triples = p
+                .apply(Create.of(options.getSource()))
+                .apply(new CreateTablesIfNotExist(
+                        options.getAccumuloName(),
+                        options.getZookeeperServers(),
+                        options.getAccumuloUsername(),
+                        options.getAccumuloPassword(),
+                        options.getDestinationTablePrefix()
+                ))
+                .apply("Read triples", new RDF4JIO.Read(options.getBatchSize()));
+
+        triples
+                .apply(new StatisticsPipeline.PrepareDestinationTable<>(
+                        options.getAccumuloName(),
+                        options.getZookeeperServers(),
+                        options.getAccumuloUsername(),
+                        options.getAccumuloPassword(),
+                        options.getStatisticsTable()
+                ))
+                .apply(CreateProspects.fromModel())
+                .apply(GroupIntoLocalBatches.of(options.getBatchSize()))
+                .apply(new StatisticsPipeline.AggregateProspects())
+                .apply(new StatisticsPipeline.ProspectToMutation())
+                .apply(GroupIntoLocalBatches.of(options.getBatchSize()))
+                .apply("Write Statistics", new AccumuloSingleTableWrite(
+                        options.getAccumuloName(),
+                        options.getZookeeperServers(),
+                        options.getAccumuloUsername(),
+                        options.getAccumuloPassword(),
+                        options.getStatisticsTable()
+                ));
+
+        PCollectionTuple mutations = triples
+                .apply(ParDo.of(new ModelToMutations())
+                        .withOutputTags(SPO_MUTATIONS, TupleTagList.of(Arrays.asList(PO_MUTATIONS, OSP_MUTATIONS)))
+                );
+
+        writeMutations(options, mutations);
+
+        return p;
+    }
+
+    private static void writeMutations(BulkLoadPipelineOptions options, PCollectionTuple mutations) {
         mutations.get(SPO_MUTATIONS)
                 .setCoder(MutationCoder.of(Mutation.class))
                 .apply(GroupIntoLocalBatches.of(options.getBatchSize()))
-                .apply(new AccumuloSingleTableWrite(
+                .apply("Write SPO table", new AccumuloSingleTableWrite(
                         options.getAccumuloName(),
                         options.getZookeeperServers(),
                         options.getAccumuloUsername(),
@@ -91,7 +152,7 @@ public class BulkLoadPipeline {
         mutations.get(PO_MUTATIONS)
                 .setCoder(MutationCoder.of(Mutation.class))
                 .apply(GroupIntoLocalBatches.of(options.getBatchSize()))
-                .apply(new AccumuloSingleTableWrite(
+                .apply("Write PO table", new AccumuloSingleTableWrite(
                         options.getAccumuloName(),
                         options.getZookeeperServers(),
                         options.getAccumuloUsername(),
@@ -101,15 +162,13 @@ public class BulkLoadPipeline {
         mutations.get(OSP_MUTATIONS)
                 .setCoder(MutationCoder.of(Mutation.class))
                 .apply(GroupIntoLocalBatches.of(options.getBatchSize()))
-                .apply(new AccumuloSingleTableWrite(
+                .apply("Write OSP table", new AccumuloSingleTableWrite(
                         options.getAccumuloName(),
                         options.getZookeeperServers(),
                         options.getAccumuloUsername(),
                         options.getAccumuloPassword(),
                         options.getDestinationTablePrefix() + "osp"
                 ));
-
-        return p;
     }
 
     private static class CreateTablesIfNotExist extends PTransform<PCollection<String>, PCollection<String>> {
@@ -150,6 +209,13 @@ public class BulkLoadPipeline {
 
             }));
         }
+
+        private void createTableIfNotExist(TableOperations tableOperations, String tableName)
+                throws TableExistsException, AccumuloSecurityException, AccumuloException {
+            AccumuloRdfUtils.createTableIfNotExist(tableOperations, tableName);
+
+            tableOperations.setProperty(tableName, "table.bloom.enabled", "true");
+        }
     }
 
     private static class ModelToMutations extends DoFn<Model, Mutation> {
@@ -183,7 +249,7 @@ public class BulkLoadPipeline {
         options.setGcpTempLocation("gs://datafabric-dataflow/staging");
         options.setRunner((Class<PipelineRunner<?>>) Class.forName("org.apache.beam.runners.dataflow.DataflowRunner"));
 //        options.setRunner((Class<PipelineRunner<?>>) Class.forName("org.apache.beam.runners.direct.DirectRunner"));
-        options.setMaxNumWorkers(40);
+        options.setMaxNumWorkers(1);
 
         options.setAccumuloName("accumulo");
         options.setZookeeperServers("10.132.0.18:2181");
@@ -192,14 +258,17 @@ public class BulkLoadPipeline {
 
         options.setBatchSize(500000);
 
-        options.setSource("gs://fibo-rdf/addresses/*.nt,gs://fibo-rdf/fibo-ru-activities/,gs://fibo-rdf/fibo-ru/," +
-                "gs://fibo-rdf/foreignle/*.nt,gs://fibo-rdf/gov/*.nt,gs://fibo-rdf/individuals/*.nt," +
-                "gs://fibo-rdf/le/*.nt,gs://fibo-rdf/people/*.nt,gs://fibo-rdf/pif/*.nt,gs://fibo-rdf/rosstat-2012/*.nt," +
-                "gs://fibo-rdf/rosstat-2013/*.nt,gs://fibo-rdf/rosstat-2014/*.nt,gs://fibo-rdf/rosstat-2015/*.nt," +
-                "gs://fibo-rdf/rosstat-2016/*.nt,gs://fibo-rdf/rosstat/,gs://fibo-rdf/ui/");
+//        options.setSource("gs://fibo-rdf/addresses/*.nt,gs://fibo-rdf/fibo-ru-activities/,gs://fibo-rdf/fibo-ru/," +
+//                "gs://fibo-rdf/foreignle/*.nt,gs://fibo-rdf/gov/*.nt,gs://fibo-rdf/individuals/*.nt," +
+//                "gs://fibo-rdf/le/*.nt,gs://fibo-rdf/people/*.nt,gs://fibo-rdf/pif/*.nt,gs://fibo-rdf/rosstat-2012/*.nt," +
+//                "gs://fibo-rdf/rosstat-2013/*.nt,gs://fibo-rdf/rosstat-2014/*.nt,gs://fibo-rdf/rosstat-2015/*.nt," +
+//                "gs://fibo-rdf/rosstat-2016/*.nt,gs://fibo-rdf/rosstat/,gs://fibo-rdf/ui/");
+        options.setSource("gs://fibo-rdf/fibo-ru-activities/*," +
+                "gs://fibo-rdf/fibo-ru/*,gs://fibo-rdf/rosstat/*,gs://fibo-rdf/ui/*");
         options.setDestinationTablePrefix("triplestore_");
+        options.setStatisticsTable("triplestore_prospects");
 
-        Pipeline p = BulkLoadPipeline.create(options);
+        Pipeline p = BulkLoadPipeline.createLoadAndStatistics(options);
         p.run();
     }
 

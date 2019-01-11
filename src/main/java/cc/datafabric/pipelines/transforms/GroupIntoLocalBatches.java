@@ -1,4 +1,4 @@
-package cc.datafabric.pipelines;
+package cc.datafabric.pipelines.transforms;
 
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;

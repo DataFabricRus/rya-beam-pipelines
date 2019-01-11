@@ -41,7 +41,7 @@ import java.util.*;
 
 import static org.junit.Assert.assertEquals;
 
-public class BuildTriplePatternCountTablePipelineTest {
+public class StatisticsPipelineTest {
 
     private static final String ACCUMULO_USERNAME = "root";
     private static final String ACCUMULO_PASSWORD = "pass";
@@ -114,8 +114,8 @@ public class BuildTriplePatternCountTablePipelineTest {
         connector.tableOperations().addSplits(IN_TABLE, splits);
 
         // Run the pipeline
-        BuildTriplePatternCountTablePipelineOptions options = PipelineOptionsFactory
-                .as(BuildTriplePatternCountTablePipelineOptions.class);
+        StatisticsPipelineOptions options = PipelineOptionsFactory
+                .as(StatisticsPipelineOptions.class);
 
         options.setAccumuloName(accumulo.getInstanceName());
         options.setZookeeperServers(accumulo.getZooKeepers());
@@ -125,7 +125,7 @@ public class BuildTriplePatternCountTablePipelineTest {
         options.setDestination(tempDir.getAbsolutePath() + "/pipeline-output/prospect");
         options.setBatchSize(2);
 
-        BuildTriplePatternCountTablePipeline
+        StatisticsPipeline
                 .createFetchOnly(options)
                 .run()
                 .waitUntilFinish();
@@ -133,7 +133,7 @@ public class BuildTriplePatternCountTablePipelineTest {
         options.setSource(tempDir.getAbsolutePath() + "/pipeline-output/prospect-*.avro");
         options.setDestination(OUT_TABLE);
 
-        BuildTriplePatternCountTablePipeline
+        StatisticsPipeline
                 .createCombinerAndWriter(options)
                 .run()
                 .waitUntilFinish();
@@ -180,8 +180,8 @@ public class BuildTriplePatternCountTablePipelineTest {
         connector.tableOperations().addSplits(IN_TABLE, splits);
 
         // Run the pipeline
-        BuildTriplePatternCountTablePipelineOptions options = PipelineOptionsFactory
-                .as(BuildTriplePatternCountTablePipelineOptions.class);
+        StatisticsPipelineOptions options = PipelineOptionsFactory
+                .as(StatisticsPipelineOptions.class);
 
         options.setAccumuloName(accumulo.getInstanceName());
         options.setZookeeperServers(accumulo.getZooKeepers());
@@ -191,7 +191,7 @@ public class BuildTriplePatternCountTablePipelineTest {
         options.setDestination(OUT_TABLE);
         options.setBatchSize(10);
 
-        BuildTriplePatternCountTablePipeline
+        StatisticsPipeline
                 .create(options)
                 .run()
                 .waitUntilFinish();
@@ -395,8 +395,8 @@ public class BuildTriplePatternCountTablePipelineTest {
         ryaDAO.destroy();
 
         // Run the pipeline
-        BuildTriplePatternCountTablePipelineOptions options = PipelineOptionsFactory
-                .as(BuildTriplePatternCountTablePipelineOptions.class);
+        StatisticsPipelineOptions options = PipelineOptionsFactory
+                .as(StatisticsPipelineOptions.class);
 
         options.setAccumuloName(accumulo.getInstanceName());
         options.setZookeeperServers(accumulo.getZooKeepers());
@@ -406,7 +406,7 @@ public class BuildTriplePatternCountTablePipelineTest {
         options.setDestination(OUT_TABLE);
         options.setBatchSize(2);
 
-        BuildTriplePatternCountTablePipeline
+        StatisticsPipeline
                 .create(options)
                 .run()
                 .waitUntilFinish();

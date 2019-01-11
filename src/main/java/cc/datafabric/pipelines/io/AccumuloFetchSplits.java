@@ -26,7 +26,7 @@ public class AccumuloFetchSplits extends PTransform<PCollection<String>, PCollec
     private final String username;
     private final String password;
 
-    AccumuloFetchSplits(String instanceName, String zookeeperServers, String username, String password) {
+    public AccumuloFetchSplits(String instanceName, String zookeeperServers, String username, String password) {
         this.instanceName = instanceName;
         this.zookeeperServers = zookeeperServers;
         this.username = username;

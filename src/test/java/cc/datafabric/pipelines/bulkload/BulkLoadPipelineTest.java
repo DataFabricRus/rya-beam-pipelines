@@ -9,15 +9,11 @@ import org.apache.accumulo.minicluster.MiniAccumuloCluster;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.commons.io.FileUtils;
 import org.apache.rya.accumulo.AccumuloRyaDAO;
-import org.apache.rya.api.RdfCloudTripleStoreConstants;
-import org.apache.rya.api.RdfCloudTripleStoreUtils;
 import org.apache.rya.api.domain.RyaIRI;
 import org.apache.rya.api.domain.RyaStatement;
 import org.apache.rya.api.domain.RyaType;
 import org.apache.rya.api.persist.RyaDAOException;
 import org.eclipse.rdf4j.common.iteration.CloseableIteration;
-import org.eclipse.rdf4j.model.ValueFactory;
-import org.eclipse.rdf4j.model.impl.SimpleValueFactory;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -33,7 +29,6 @@ public class BulkLoadPipelineTest {
     private static final String ACCUMULO_USERNAME = "root";
     private static final String ACCUMULO_PASSWORD = "pass";
     private static final String DEST_TABLE_PREFIX = "rya_";
-    private static final ValueFactory VF = SimpleValueFactory.getInstance();
 
     private MiniAccumuloCluster accumulo;
     private File tempDir;

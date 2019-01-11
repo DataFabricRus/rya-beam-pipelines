@@ -1,7 +1,7 @@
 package cc.datafabric.pipelines.statistics;
 
 import cc.datafabric.pipelines.AvroContainer;
-import cc.datafabric.pipelines.GroupIntoLocalBatches;
+import cc.datafabric.pipelines.transforms.GroupIntoLocalBatches;
 import cc.datafabric.pipelines.coders.IntermediateProspectCoder;
 import cc.datafabric.pipelines.coders.MapEntryCoder;
 import cc.datafabric.pipelines.coders.MutationCoder;
@@ -9,10 +9,13 @@ import cc.datafabric.pipelines.coders.RangeCoder;
 import cc.datafabric.pipelines.io.AccumuloIO;
 import cc.datafabric.pipelines.io.AccumuloSingleTableWrite;
 import cc.datafabric.pipelines.options.DefaultRyaPipelineOptions;
-import org.apache.accumulo.core.client.*;
+import cc.datafabric.pipelines.transforms.CreateProspects;
+import org.apache.accumulo.core.client.Connector;
+import org.apache.accumulo.core.client.Instance;
+import org.apache.accumulo.core.client.IteratorSetting;
+import org.apache.accumulo.core.client.ZooKeeperInstance;
 import org.apache.accumulo.core.client.admin.NewTableConfiguration;
 import org.apache.accumulo.core.client.security.tokens.PasswordToken;
-import org.apache.accumulo.core.data.Key;
 import org.apache.accumulo.core.data.Mutation;
 import org.apache.accumulo.core.data.Range;
 import org.apache.accumulo.core.data.Value;
@@ -27,26 +30,15 @@ import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.io.AvroIO;
-import org.apache.beam.sdk.io.hadoop.WritableCoder;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.transforms.*;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.rya.api.RdfCloudTripleStoreConstants;
-import org.apache.rya.api.domain.RyaStatement;
-import org.apache.rya.api.domain.RyaType;
-import org.apache.rya.api.resolver.RyaTripleContext;
-import org.apache.rya.api.resolver.triple.TripleRow;
-import org.apache.rya.api.resolver.triple.TripleRowResolverException;
 import org.apache.rya.prospector.domain.IntermediateProspect;
-import org.apache.rya.prospector.domain.TripleValueType;
 import org.apache.rya.prospector.plans.IndexWorkPlan;
 import org.apache.rya.prospector.utils.ProspectorConstants;
-import org.eclipse.rdf4j.model.util.URIUtil;
-import org.eclipse.rdf4j.model.vocabulary.XMLSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -57,7 +49,7 @@ import java.util.stream.StreamSupport;
 import static com.google.common.base.Preconditions.checkArgument;
 import static org.apache.rya.prospector.utils.ProspectorConstants.COUNT;
 
-interface BuildTriplePatternCountTablePipelineOptions extends DefaultRyaPipelineOptions {
+interface StatisticsPipelineOptions extends DefaultRyaPipelineOptions {
 
     String getSource();
 
@@ -77,26 +69,32 @@ interface BuildTriplePatternCountTablePipelineOptions extends DefaultRyaPipeline
  * Set of pipelines which help to build the Prospect table.
  *
  * <ul>
- * <li>{@link #create(BuildTriplePatternCountTablePipelineOptions)} - pipeline which does all the steps,</li>
- * <li>{@link #createFetchOnly(BuildTriplePatternCountTablePipelineOptions)} - pipeline which reads the index and save prospects to files,</li>
- * <li>{@link #createCombinerAndWriter(BuildTriplePatternCountTablePipelineOptions)} - pipeline which reads prospects from the files, aggregate them and writes to a table.</li>
+ * <li>{@link #create(StatisticsPipelineOptions)} - pipeline which does all the steps,</li>
+ * <li>{@link #createFetchOnly(StatisticsPipelineOptions)} - pipeline which reads the index and save prospects to files,</li>
+ * <li>{@link #createCombinerAndWriter(StatisticsPipelineOptions)} - pipeline which reads prospects from the files, aggregate them and writes to a table.</li>
  * </ul>
  */
-class BuildTriplePatternCountTablePipeline {
+public class StatisticsPipeline {
 
-    private static final Logger LOG = LoggerFactory.getLogger(BuildTriplePatternCountTablePipeline.class);
+    private static final Logger LOG = LoggerFactory.getLogger(StatisticsPipeline.class);
 
-    public static Pipeline create(BuildTriplePatternCountTablePipelineOptions options) {
+    public static Pipeline create(StatisticsPipelineOptions options) {
         Pipeline p = preparePipeline(options);
 
         p
                 .apply(Create.of(options.getSource()))
-                .apply("Prepare tables", new PrepareDestinationTable<>())
+                .apply("Prepare tables", new PrepareDestinationTable<>(
+                        options.getAccumuloName(),
+                        options.getZookeeperServers(),
+                        options.getAccumuloUsername(),
+                        options.getAccumuloPassword(),
+                        options.getDestination()
+                ))
                 .apply(new AccumuloIO.Read(
                         options.getAccumuloName(), options.getZookeeperServers(),
                         options.getAccumuloUsername(), options.getAccumuloPassword()
                 ))
-                .apply(new TripleToProspects())
+                .apply(CreateProspects.fromAccumuloRow())
                 .apply(GroupIntoLocalBatches.of(options.getBatchSize()))
                 .apply(new AggregateProspects())
                 .apply(new ProspectToMutation())
@@ -112,7 +110,7 @@ class BuildTriplePatternCountTablePipeline {
         return p;
     }
 
-    public static Pipeline createFetchOnly(BuildTriplePatternCountTablePipelineOptions options) {
+    public static Pipeline createFetchOnly(StatisticsPipelineOptions options) {
         Pipeline p = preparePipeline(options);
 
         p
@@ -121,7 +119,7 @@ class BuildTriplePatternCountTablePipeline {
                         options.getAccumuloName(), options.getZookeeperServers(),
                         options.getAccumuloUsername(), options.getAccumuloPassword()
                 ))
-                .apply(new TripleToProspects())
+                .apply(CreateProspects.fromAccumuloRow())
                 .apply(MapElements.via(new SimpleFunction<Map.Entry<IntermediateProspect, Long>, AvroContainer>() {
 
                     @Override
@@ -144,12 +142,18 @@ class BuildTriplePatternCountTablePipeline {
         return p;
     }
 
-    public static Pipeline createCombinerAndWriter(BuildTriplePatternCountTablePipelineOptions options) {
+    public static Pipeline createCombinerAndWriter(StatisticsPipelineOptions options) {
         Pipeline p = preparePipeline(options);
 
         p
                 .apply(Create.of(options.getSource()))
-                .apply("Prepare tables",new PrepareDestinationTable<>())
+                .apply("Prepare tables", new PrepareDestinationTable<>(
+                        options.getAccumuloName(),
+                        options.getZookeeperServers(),
+                        options.getAccumuloUsername(),
+                        options.getAccumuloPassword(),
+                        options.getDestination()
+                ))
                 .apply(AvroIO.readAll(AvroContainer.class))
                 .apply("Unpack prospect", ParDo.of(new DoFn<AvroContainer, Map.Entry<IntermediateProspect, Long>>() {
 
@@ -186,7 +190,7 @@ class BuildTriplePatternCountTablePipeline {
         return p;
     }
 
-    private static Pipeline preparePipeline(BuildTriplePatternCountTablePipelineOptions options) {
+    private static Pipeline preparePipeline(StatisticsPipelineOptions options) {
         Pipeline p = Pipeline.create(options);
 
         p.getCoderRegistry().registerCoderForClass(String.class, StringUtf8Coder.of());
@@ -198,30 +202,41 @@ class BuildTriplePatternCountTablePipeline {
         return p;
     }
 
-    private static class PrepareDestinationTable<T> extends PTransform<PCollection<T>, PCollection<T>> {
+    public static class PrepareDestinationTable<T> extends PTransform<PCollection<T>, PCollection<T>> {
+
+        private final String instanceName;
+        private final String zookeepers;
+        private final String username;
+        private final String password;
+        private final String tableName;
+
+        public PrepareDestinationTable(String instanceName, String zookeeperServers, String username, String password,
+                                        String tableName) {
+            this.instanceName = instanceName;
+            this.zookeepers = zookeeperServers;
+            this.username = username;
+            this.password = password;
+            this.tableName = tableName;
+        }
+
         @Override
         public PCollection<T> expand(PCollection<T> input) {
             return input.apply(ParDo.of(new DoFn<T, T>() {
 
                 @ProcessElement
                 public void processElement(ProcessContext ctx) throws Exception {
-                    BuildTriplePatternCountTablePipelineOptions options = ctx.getPipelineOptions()
-                            .as(BuildTriplePatternCountTablePipelineOptions.class);
-
-                    final Instance instance = new ZooKeeperInstance(
-                            options.getAccumuloName(), options.getZookeeperServers());
-                    final Connector conn = instance.getConnector(
-                            options.getAccumuloUsername(), new PasswordToken(options.getAccumuloPassword()));
+                    final Instance instance = new ZooKeeperInstance(instanceName, zookeepers);
+                    final Connector conn = instance.getConnector(username, new PasswordToken(password));
 
                     // Create the output table if doesn't exist
-                    boolean exists = conn.tableOperations().exists(options.getDestination());
+                    boolean exists = conn.tableOperations().exists(tableName);
                     if (!exists) {
-                        LOG.info("Table {} doesn't exist. Will create it.", options.getDestination());
-                        conn.tableOperations().create(options.getDestination(), new NewTableConfiguration()
+                        LOG.info("Table {} doesn't exist. Will create it.", tableName);
+                        conn.tableOperations().create(tableName, new NewTableConfiguration()
                                 .withoutDefaultIterators());
                     }
                     // Attach the iterator if it doesn't exist
-                    exists = conn.tableOperations().listIterators(options.getDestination())
+                    exists = conn.tableOperations().listIterators(tableName)
                             .containsKey("prospectsSumming");
                     if (!exists) {
                         LOG.info("Prospects summing iterator doesn't exist. Will attach it.");
@@ -233,7 +248,7 @@ class BuildTriplePatternCountTablePipeline {
                         LongCombiner.setEncodingType(iteratorSetting, LongCombiner.Type.STRING);
                         Combiner.setColumns(iteratorSetting,
                                 Collections.singletonList(new IteratorSetting.Column(ProspectorConstants.COUNT)));
-                        conn.tableOperations().attachIterator(options.getDestination(), iteratorSetting);
+                        conn.tableOperations().attachIterator(tableName, iteratorSetting);
                     }
 
                     ctx.output(ctx.element());
@@ -242,136 +257,7 @@ class BuildTriplePatternCountTablePipeline {
         }
     }
 
-    private static class TripleToProspects extends PTransform<PCollection<Map.Entry<Key, Value>>, PCollection<Map.Entry<IntermediateProspect, Long>>> {
-        @Override
-        public PCollection<Map.Entry<IntermediateProspect, Long>> expand(PCollection<Map.Entry<Key, Value>> input) {
-            return input
-                    .apply(ParDo.of(new DoFn<Map.Entry<Key, Value>, Map.Entry<IntermediateProspect, Long>>() {
-                        @ProcessElement
-                        public void processElement(ProcessContext ctx) throws TripleRowResolverException {
-                            final Map.Entry<Key, Value> kv = ctx.element();
-                            try {
-                                RyaTripleContext rtc = new RyaTripleContext(false);
-                                RyaStatement statement = rtc
-                                        .deserializeTriple(RdfCloudTripleStoreConstants.TABLE_LAYOUT.SPO,
-                                                new TripleRow(
-                                                        kv.getKey().getRow().getBytes(),
-                                                        kv.getKey().getColumnFamily().getBytes(),
-                                                        kv.getKey().getColumnQualifier().getBytes(),
-                                                        kv.getKey().getTimestamp(),
-                                                        kv.getKey().getColumnVisibility().getBytes(),
-                                                        kv.getValue().get()
-                                                ));
-
-                                final String subject = statement.getSubject().getData();
-                                final String predicate = statement.getPredicate().getData();
-                                final String subjpred = statement.getSubject().getData() + IndexWorkPlan.DELIM
-                                        + statement.getPredicate().getData();
-                                final String predobj = statement.getPredicate().getData() + IndexWorkPlan.DELIM
-                                        + statement.getObject().getData();
-                                final String subjobj = statement.getSubject().getData() + IndexWorkPlan.DELIM
-                                        + statement.getObject().getData();
-                                final RyaType object = statement.getObject();
-                                final int localIndex = URIUtil.getLocalNameIndex(subject);
-                                final String namespace = subject.substring(0, localIndex - 1);
-                                final String visibility = new String(statement.getColumnVisibility(), StandardCharsets.UTF_8);
-
-                                ctx.output(
-                                        new HashMap.SimpleEntry<>(
-                                                IntermediateProspect.builder()
-                                                        .setIndex(ProspectorConstants.COUNT)
-                                                        .setData(subject)
-                                                        .setDataType(IndexWorkPlan.URITYPE)
-                                                        .setTripleValueType(TripleValueType.SUBJECT)
-                                                        .setVisibility(visibility)
-                                                        .build(),
-                                                1L
-                                        )
-                                );
-                                ctx.output(
-                                        new HashMap.SimpleEntry<>(
-                                                IntermediateProspect.builder()
-                                                        .setIndex(ProspectorConstants.COUNT)
-                                                        .setData(predicate)
-                                                        .setDataType(IndexWorkPlan.URITYPE)
-                                                        .setTripleValueType(TripleValueType.PREDICATE)
-                                                        .setVisibility(visibility)
-                                                        .build(),
-                                                1L
-                                        )
-                                );
-                                ctx.output(
-                                        new HashMap.SimpleEntry<>(
-                                                IntermediateProspect.builder()
-                                                        .setIndex(ProspectorConstants.COUNT)
-                                                        .setData(object.getData())
-                                                        .setDataType(object.getDataType().stringValue())
-                                                        .setTripleValueType(TripleValueType.OBJECT)
-                                                        .setVisibility(visibility)
-                                                        .build(),
-                                                1L
-                                        )
-                                );
-                                ctx.output(
-                                        new HashMap.SimpleEntry<>(
-                                                IntermediateProspect.builder()
-                                                        .setIndex(ProspectorConstants.COUNT)
-                                                        .setData(subjpred)
-                                                        .setDataType(XMLSchema.STRING.toString())
-                                                        .setTripleValueType(TripleValueType.SUBJECT_PREDICATE)
-                                                        .setVisibility(visibility)
-                                                        .build(),
-                                                1L
-                                        )
-                                );
-                                ctx.output(
-                                        new HashMap.SimpleEntry<>(
-                                                IntermediateProspect.builder()
-                                                        .setIndex(ProspectorConstants.COUNT)
-                                                        .setData(subjobj)
-                                                        .setDataType(XMLSchema.STRING.toString())
-                                                        .setTripleValueType(TripleValueType.SUBJECT_OBJECT)
-                                                        .setVisibility(visibility)
-                                                        .build(),
-                                                1L
-                                        )
-                                );
-                                ctx.output(
-                                        new HashMap.SimpleEntry<>(
-                                                IntermediateProspect.builder()
-                                                        .setIndex(ProspectorConstants.COUNT)
-                                                        .setData(predobj)
-                                                        .setDataType(XMLSchema.STRING.toString())
-                                                        .setTripleValueType(TripleValueType.PREDICATE_OBJECT)
-                                                        .setVisibility(visibility)
-                                                        .build(),
-                                                1L
-                                        )
-                                );
-                                ctx.output(
-                                        new HashMap.SimpleEntry<>(
-                                                IntermediateProspect.builder()
-                                                        .setIndex(ProspectorConstants.COUNT)
-                                                        .setData(namespace)
-                                                        .setDataType(IndexWorkPlan.URITYPE)
-                                                        .setTripleValueType(TripleValueType.ENTITY)
-                                                        .setVisibility(visibility)
-                                                        .build(),
-                                                1L
-                                        )
-                                );
-                            } catch (Throwable e) {
-                                LOG.error(e.getMessage(), e);
-
-                                throw e;
-                            }
-                        }
-                    }))
-                    .setCoder(MapEntryCoder.of(WritableCoder.of(IntermediateProspect.class), VarLongCoder.of()));
-        }
-    }
-
-    private static class ProspectToMutation extends PTransform<PCollection<Map.Entry<IntermediateProspect, Long>>, PCollection<Mutation>> {
+    public static class ProspectToMutation extends PTransform<PCollection<Map.Entry<IntermediateProspect, Long>>, PCollection<Mutation>> {
         @Override
         public PCollection<Mutation> expand(PCollection<Map.Entry<IntermediateProspect, Long>> input) {
             return input.apply(MapElements.via(new SimpleFunction<Map.Entry<IntermediateProspect, Long>, Mutation>() {
@@ -389,7 +275,8 @@ class BuildTriplePatternCountTablePipeline {
                     final Mutation mutation = new Mutation(
                             indexType + IndexWorkPlan.DELIM + prospect.getData());
 
-                    final ColumnVisibility visibility = new ColumnVisibility(prospect.getVisibility());
+                    final ColumnVisibility visibility = prospect.getVisibility() == null ?
+                            new ColumnVisibility() : new ColumnVisibility(prospect.getVisibility());
                     final Value sumValue = new Value(new LongCombiner.StringEncoder().encode(prospectCount));
 
                     mutation.put(COUNT, prospect.getDataType(), visibility, System.currentTimeMillis(), sumValue);
@@ -400,7 +287,7 @@ class BuildTriplePatternCountTablePipeline {
         }
     }
 
-    private static class AggregateProspects extends PTransform<PCollection<Iterable<Map.Entry<IntermediateProspect, Long>>>, PCollection<Map.Entry<IntermediateProspect, Long>>> {
+    public static class AggregateProspects extends PTransform<PCollection<Iterable<Map.Entry<IntermediateProspect, Long>>>, PCollection<Map.Entry<IntermediateProspect, Long>>> {
         @Override
         public PCollection<Map.Entry<IntermediateProspect, Long>> expand(PCollection<Iterable<Map.Entry<IntermediateProspect, Long>>> input) {
             return input.apply(ParDo.of(new DoFn<Iterable<Map.Entry<IntermediateProspect, Long>>, Map.Entry<IntermediateProspect, Long>>() {
@@ -432,8 +319,8 @@ class BuildTriplePatternCountTablePipeline {
      * * Option B - do the same, but with an intermediate step that stores the index in a Google Storage.
      */
     public static void main(String[] args) throws ClassNotFoundException {
-        BuildTriplePatternCountTablePipelineOptions options = PipelineOptionsFactory
-                .as(BuildTriplePatternCountTablePipelineOptions.class);
+        StatisticsPipelineOptions options = PipelineOptionsFactory
+                .as(StatisticsPipelineOptions.class);
 
         options.setProject("core-datafabric");
         options.setRegion("europe-west1");
@@ -491,7 +378,7 @@ class BuildTriplePatternCountTablePipeline {
 
         options.setBatchSize(500000);
 
-        Pipeline p = BuildTriplePatternCountTablePipeline.createCombinerAndWriter(options);
+        Pipeline p = StatisticsPipeline.createCombinerAndWriter(options);
         p.run();
     }
 

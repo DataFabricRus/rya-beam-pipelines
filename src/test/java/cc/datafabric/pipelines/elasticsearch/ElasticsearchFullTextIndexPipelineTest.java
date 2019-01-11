@@ -12,6 +12,7 @@ import org.apache.rya.accumulo.AccumuloRyaDAO;
 import org.apache.rya.api.domain.RyaIRI;
 import org.apache.rya.api.domain.RyaStatement;
 import org.apache.rya.api.domain.RyaType;
+import org.apache.rya.api.persist.RyaDAOException;
 import org.eclipse.rdf4j.model.vocabulary.XMLSchema;
 import org.junit.After;
 import org.junit.Before;
@@ -21,9 +22,14 @@ import pl.allegro.tech.embeddedelasticsearch.PopularProperties;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.UnknownHostException;
+import java.time.Instant;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 public class ElasticsearchFullTextIndexPipelineTest {
@@ -68,7 +74,7 @@ public class ElasticsearchFullTextIndexPipelineTest {
     }
 
     @Test
-    public void test() throws Exception {
+    public void testWithoutTimestampFilter() throws Exception {
         // Load some data into Accumulo
         final AccumuloRyaDAO ryaDAO = new AccumuloRyaDAO();
         ryaDAO.setConnector(connector);
@@ -113,5 +119,83 @@ public class ElasticsearchFullTextIndexPipelineTest {
         assertTrue(!documents.isEmpty());
 
         System.out.println(documents);
+    }
+
+    @Test
+    public void testWithTimestampFilter() throws RyaDAOException, UnknownHostException {
+        final AccumuloRyaDAO ryaDAO = new AccumuloRyaDAO();
+        ryaDAO.setConnector(connector);
+        ryaDAO.init();
+
+        long newTimestamp = Instant.now().getEpochSecond() * 1000;
+        long oldTimestamp = Instant.now().minusSeconds(60000).getEpochSecond() * 1000;
+
+        ryaDAO.add(RyaStatement.builder()
+                .setSubject(new RyaIRI("urn:gem:etype#1234"))
+                .setPredicate(new RyaIRI("urn:gem#pred"))
+                .setObject(new RyaType(XMLSchema.STRING, "mydata1", "en"))
+                .setTimestamp(oldTimestamp)
+                .build());
+        ryaDAO.add(RyaStatement.builder()
+                .setSubject(new RyaIRI("urn:gem:etype#1234"))
+                .setPredicate(new RyaIRI("urn:gem#pred"))
+                .setObject(new RyaType("mydata2"))
+                .setTimestamp(oldTimestamp)
+                .build());
+        ryaDAO.add(RyaStatement.builder()
+                .setSubject(new RyaIRI("urn:gem:etype#1235"))
+                .setPredicate(new RyaIRI("urn:gem#pred"))
+                .setObject(new RyaType(XMLSchema.INTEGER, "12"))
+                .setTimestamp(oldTimestamp)
+                .build());
+        ryaDAO.add(RyaStatement.builder()
+                .setSubject(new RyaIRI("urn:gem:etype#1235"))
+                .setPredicate(new RyaIRI("urn:gem#pred1"))
+                .setObject(new RyaType("12"))
+                .setTimestamp(oldTimestamp)
+                .build());
+
+        ryaDAO.add(RyaStatement.builder()
+                .setSubject(new RyaIRI("urn:gem:etype#1234"))
+                .setPredicate(new RyaIRI("urn:gem#pred"))
+                .setObject(new RyaType("12"))
+                .setTimestamp(newTimestamp)
+                .build());
+
+        ryaDAO.destroy();
+
+        // Run the pipeline
+        ElasticsearchFullTextIndexPipelineOptions options = PipelineOptionsFactory
+                .as(ElasticsearchFullTextIndexPipelineOptions.class);
+
+        options.setAccumuloName(accumulo.getInstanceName());
+        options.setZookeeperServers(accumulo.getZooKeepers());
+        options.setAccumuloUsername(ACCUMULO_USERNAME);
+        options.setAccumuloPassword(ACCUMULO_PASSWORD);
+        options.setSource(IN_TABLE);
+        options.setElasticsearchHost("localhost");
+        options.setProperties(new String[]{
+                "urn:gem#pred"
+        });
+        options.setBatchSize(2);
+        options.setStartDateTime(DateTimeFormatter.ISO_DATE_TIME
+                .format(ZonedDateTime.now().minusSeconds(10)));
+        options.setEndDateTime(DateTimeFormatter.ISO_DATE_TIME
+                .format(ZonedDateTime.now()));
+
+        ElasticsearchFullTextIndexPipeline
+                .createWithTimestampFilter(options)
+                .run()
+                .waitUntilFinish();
+
+        List<String> documents = embeddedElastic.fetchAllDocuments("elastic-search-sail");
+
+        System.out.println(documents);
+
+        assertTrue(documents.size() == 1);
+        assertEquals(
+                "{\"context\":\"null\",\"text\":[\"12\",\"mydata1\",\"mydata2\"],\"uri\":\"urn:gem:etype#1234\",\"p_urn:gem#pred\":[\"12\",\"mydata1\",\"mydata2\"]}",
+                documents.get(0)
+        );
     }
 }
